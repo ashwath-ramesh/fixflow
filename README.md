@@ -117,6 +117,7 @@ base_branch = "main"
   [projects.github]
   owner = "org"
   repo = "repo"
+  # include_labels = ["autopr"] # optional: ANY match; empty means all open issues
 ```
 
 ### File Locations
@@ -157,8 +158,11 @@ log_file = "/custom/path/autopr.log"
 ### GitHub (polling)
 
 1. Add `[projects.github]` with `owner` and `repo`.
-2. AutoPR polls for open issues every `sync_interval`.
-3. New issues are picked up and processed automatically.
+2. Optional gating: set `include_labels = ["autopr"]` to only create jobs for matching issues.
+3. Matching is case-insensitive and uses ANY configured label.
+4. Empty `include_labels` keeps current behavior (all open issues are eligible).
+5. AutoPR polls for open issues every `sync_interval`.
+6. New eligible issues are picked up and processed automatically.
 
 ### GitLab (webhook-driven)
 

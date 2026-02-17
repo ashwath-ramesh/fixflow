@@ -15,10 +15,10 @@ import (
 
 // Credentials holds tokens loaded from credentials.toml.
 type Credentials struct {
-	GitHubToken        string `toml:"github_token"`
-	GitLabToken        string `toml:"gitlab_token"`
-	SentryToken        string `toml:"sentry_token"`
-	WebhookSecret      string `toml:"webhook_secret"`
+	GitHubToken   string `toml:"github_token"`
+	GitLabToken   string `toml:"gitlab_token"`
+	SentryToken   string `toml:"sentry_token"`
+	WebhookSecret string `toml:"webhook_secret"`
 }
 
 // LoadCredentials reads credentials.toml. Returns an empty Credentials if
@@ -72,10 +72,10 @@ func SaveCredentials(creds *Credentials) error {
 }
 
 type Config struct {
-	DBPath   string `toml:"db_path"`
+	DBPath    string `toml:"db_path"`
 	ReposRoot string `toml:"repos_root"`
-	LogLevel string `toml:"log_level"`
-	LogFile  string `toml:"log_file"`
+	LogLevel  string `toml:"log_level"`
+	LogFile   string `toml:"log_file"`
 
 	Daemon DaemonConfig `toml:"daemon"`
 	Tokens TokensConfig `toml:"tokens"`
@@ -113,14 +113,14 @@ type LLMConfig struct {
 }
 
 type ProjectConfig struct {
-	Name       string              `toml:"name"`
-	RepoURL    string              `toml:"repo_url"`
-	TestCmd    string              `toml:"test_cmd"`
-	BaseBranch string              `toml:"base_branch"`
-	GitLab     *ProjectGitLab      `toml:"gitlab"`
-	GitHub     *ProjectGitHub      `toml:"github"`
-	Sentry     *ProjectSentry      `toml:"sentry"`
-	Prompts    *ProjectPrompts     `toml:"prompts"`
+	Name       string          `toml:"name"`
+	RepoURL    string          `toml:"repo_url"`
+	TestCmd    string          `toml:"test_cmd"`
+	BaseBranch string          `toml:"base_branch"`
+	GitLab     *ProjectGitLab  `toml:"gitlab"`
+	GitHub     *ProjectGitHub  `toml:"github"`
+	Sentry     *ProjectSentry  `toml:"sentry"`
+	Prompts    *ProjectPrompts `toml:"prompts"`
 }
 
 type ProjectGitLab struct {
@@ -129,8 +129,9 @@ type ProjectGitLab struct {
 }
 
 type ProjectGitHub struct {
-	Owner string `toml:"owner"`
-	Repo  string `toml:"repo"`
+	Owner         string   `toml:"owner"`
+	Repo          string   `toml:"repo"`
+	IncludeLabels []string `toml:"include_labels"`
 }
 
 type ProjectSentry struct {
@@ -317,8 +318,36 @@ func validate(cfg *Config) error {
 		if p.GitLab == nil && p.GitHub == nil && p.Sentry == nil {
 			return fmt.Errorf("project %q: at least one source (gitlab/github/sentry) is required", p.Name)
 		}
+		if p.GitHub != nil {
+			normalized, err := normalizeLabels(p.GitHub.IncludeLabels)
+			if err != nil {
+				return fmt.Errorf("project %q github.include_labels: %w", p.Name, err)
+			}
+			cfg.Projects[i].GitHub.IncludeLabels = normalized
+		}
 	}
 	return nil
+}
+
+func normalizeLabels(labels []string) ([]string, error) {
+	if len(labels) == 0 {
+		return nil, nil
+	}
+
+	out := make([]string, 0, len(labels))
+	seen := make(map[string]struct{}, len(labels))
+	for i, label := range labels {
+		normalized := strings.ToLower(strings.TrimSpace(label))
+		if normalized == "" {
+			return nil, fmt.Errorf("label at index %d is empty", i)
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out, nil
 }
 
 func resolvePaths(cfg *Config) {

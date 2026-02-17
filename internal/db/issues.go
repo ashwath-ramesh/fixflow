@@ -12,7 +12,7 @@ import (
 )
 
 type Issue struct {
-	AutoPRIssueID string
+	AutoPRIssueID  string
 	ProjectName    string
 	Source         string
 	SourceIssueID  string
@@ -22,6 +22,9 @@ type Issue struct {
 	State          string
 	LabelsJSON     string
 	SourceMetaJSON string
+	Eligible       bool
+	SkipReason     string
+	EvaluatedAt    string
 	SourceUpdated  string
 	SyncedAt       string
 }
@@ -36,6 +39,9 @@ type IssueUpsert struct {
 	State         string
 	Labels        []string
 	SourceMeta    map[string]any
+	Eligible      *bool
+	SkipReason    string
+	EvaluatedAt   string
 	SourceUpdated string
 }
 
@@ -58,11 +64,23 @@ func (s *Store) UpsertIssue(ctx context.Context, in IssueUpsert) (string, error)
 		b, _ := json.Marshal(in.SourceMeta)
 		metaJSON = string(b)
 	}
+	eligible := true
+	if in.Eligible != nil {
+		eligible = *in.Eligible
+	}
+	evaluatedAt := in.EvaluatedAt
+	if evaluatedAt == "" {
+		evaluatedAt = now
+	}
+	skipReason := in.SkipReason
+	if eligible {
+		skipReason = ""
+	}
 	const q = `
 INSERT INTO issues(
   autopr_issue_id, project_name, source, source_issue_id, title, body, url, state,
-  labels_json, source_meta_json, source_updated_at, synced_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+  labels_json, source_meta_json, eligible, skip_reason, evaluated_at, source_updated_at, synced_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(project_name, source, source_issue_id) DO UPDATE SET
   title=excluded.title,
   body=excluded.body,
@@ -70,13 +88,16 @@ ON CONFLICT(project_name, source, source_issue_id) DO UPDATE SET
   state=excluded.state,
   labels_json=excluded.labels_json,
   source_meta_json=excluded.source_meta_json,
+  eligible=excluded.eligible,
+  skip_reason=excluded.skip_reason,
+  evaluated_at=excluded.evaluated_at,
   source_updated_at=excluded.source_updated_at,
   synced_at=excluded.synced_at
 RETURNING autopr_issue_id`
 	var actualID string
 	err = s.Writer.QueryRowContext(ctx, q,
 		newID, in.ProjectName, in.Source, in.SourceIssueID, in.Title, in.Body, in.URL, in.State,
-		labelsJSON, metaJSON, in.SourceUpdated, now,
+		labelsJSON, metaJSON, boolToInt(eligible), skipReason, evaluatedAt, in.SourceUpdated, now,
 	).Scan(&actualID)
 	if err != nil {
 		return "", fmt.Errorf("upsert issue %s/%s/%s: %w", in.ProjectName, in.Source, in.SourceIssueID, err)
@@ -87,13 +108,14 @@ RETURNING autopr_issue_id`
 func (s *Store) GetIssueByAPID(ctx context.Context, autoprID string) (Issue, error) {
 	const q = `
 SELECT autopr_issue_id, project_name, source, source_issue_id, title, body, url, state,
-       labels_json, source_meta_json, source_updated_at, synced_at
+       labels_json, source_meta_json, eligible, skip_reason, evaluated_at, source_updated_at, synced_at
 FROM issues WHERE autopr_issue_id = ?`
 	var it Issue
+	var eligible int
 	err := s.Reader.QueryRowContext(ctx, q, autoprID).Scan(
 		&it.AutoPRIssueID, &it.ProjectName, &it.Source, &it.SourceIssueID,
 		&it.Title, &it.Body, &it.URL, &it.State,
-		&it.LabelsJSON, &it.SourceMetaJSON, &it.SourceUpdated, &it.SyncedAt,
+		&it.LabelsJSON, &it.SourceMetaJSON, &eligible, &it.SkipReason, &it.EvaluatedAt, &it.SourceUpdated, &it.SyncedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -101,6 +123,7 @@ FROM issues WHERE autopr_issue_id = ?`
 		}
 		return Issue{}, fmt.Errorf("get issue %s: %w", autoprID, err)
 	}
+	it.Eligible = eligible == 1
 	return it, nil
 }
 
@@ -145,4 +168,11 @@ func newAutoPRIssueID() (string, error) {
 		return "", fmt.Errorf("generate autopr_issue_id: %w", err)
 	}
 	return "ap-" + strings.ToLower(hex.EncodeToString(buf)), nil
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

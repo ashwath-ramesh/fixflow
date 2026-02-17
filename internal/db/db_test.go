@@ -241,3 +241,180 @@ func TestRecoverInFlightJobs(t *testing.T) {
 		t.Fatalf("expected queued, got %s", job.State)
 	}
 }
+
+func TestIssueEligibilityRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	eligible := false
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "44",
+		Title:         "label-gated issue",
+		URL:           "https://github.com/org/repo/issues/44",
+		State:         "open",
+		Eligible:      &eligible,
+		SkipReason:    "missing required labels: autopr",
+		EvaluatedAt:   "2026-02-17T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	issue, err := store.GetIssueByAPID(ctx, issueID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.Eligible {
+		t.Fatalf("expected ineligible issue")
+	}
+	if issue.SkipReason != "missing required labels: autopr" {
+		t.Fatalf("unexpected skip reason: %q", issue.SkipReason)
+	}
+	if issue.EvaluatedAt != "2026-02-17T00:00:00Z" {
+		t.Fatalf("unexpected evaluated_at: %q", issue.EvaluatedAt)
+	}
+}
+
+func TestClaimJobSkipsIneligibleIssues(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ineligible := false
+	ineligibleIssueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "100",
+		Title:         "ineligible issue",
+		URL:           "https://github.com/org/repo/issues/100",
+		State:         "open",
+		Eligible:      &ineligible,
+		SkipReason:    "missing required labels: autopr",
+	})
+	if err != nil {
+		t.Fatalf("upsert ineligible issue: %v", err)
+	}
+	if _, err := store.CreateJob(ctx, ineligibleIssueID, "myproject", 3); err != nil {
+		t.Fatalf("create ineligible job: %v", err)
+	}
+
+	eligibleIssueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "101",
+		Title:         "eligible issue",
+		URL:           "https://github.com/org/repo/issues/101",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert eligible issue: %v", err)
+	}
+	eligibleJobID, err := store.CreateJob(ctx, eligibleIssueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create eligible job: %v", err)
+	}
+
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if claimedID != eligibleJobID {
+		t.Fatalf("expected eligible job %q, got %q", eligibleJobID, claimedID)
+	}
+
+	job, err := store.GetJob(ctx, eligibleJobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "planning" {
+		t.Fatalf("expected claimed job in planning, got %q", job.State)
+	}
+}
+
+func TestResetJobForRetryBlockedWhenIssueIneligible(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "200",
+		Title:         "retry gate issue",
+		URL:           "https://github.com/org/repo/issues/200",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if claimedID != jobID {
+		t.Fatalf("expected claimed job %q, got %q", jobID, claimedID)
+	}
+	if err := store.TransitionState(ctx, jobID, "planning", "failed"); err != nil {
+		t.Fatalf("transition to failed: %v", err)
+	}
+
+	ineligible := false
+	if _, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "200",
+		Title:         "retry gate issue",
+		URL:           "https://github.com/org/repo/issues/200",
+		State:         "open",
+		Eligible:      &ineligible,
+		SkipReason:    "missing required labels: autopr",
+	}); err != nil {
+		t.Fatalf("update issue eligibility: %v", err)
+	}
+
+	err = store.ResetJobForRetry(ctx, jobID, "retry")
+	if err == nil {
+		t.Fatalf("expected retry to be blocked")
+	}
+	if !strings.Contains(err.Error(), "ineligible") {
+		t.Fatalf("expected ineligible error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "missing required labels: autopr") {
+		t.Fatalf("expected skip reason in error, got %v", err)
+	}
+
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "failed" {
+		t.Fatalf("expected failed state after blocked retry, got %q", job.State)
+	}
+}

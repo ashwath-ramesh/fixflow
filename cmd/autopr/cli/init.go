@@ -194,6 +194,7 @@ base_branch = "main"
   [projects.github]
   owner = "org"
   repo = "repo"
+  # include_labels = ["autopr"]  # optional: ANY match; empty means all open issues
 
   # [projects.sentry]
   # org = "my-org"
