@@ -43,6 +43,6 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("signal process %d: %w", pid, err)
 	}
 
-	fmt.Printf("Sent SIGTERM to daemon (pid %d)\n", pid)
+	fmt.Printf("Stopping daemon (pid %d)...\n", pid)
 	return nil
 }

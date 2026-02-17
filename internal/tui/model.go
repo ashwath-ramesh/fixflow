@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"autopr/internal/config"
 	"autopr/internal/db"
@@ -76,9 +76,10 @@ type Model struct {
 	cfg   *config.Config
 
 	// Level 1: job list
-	jobs         []db.Job
-	issueSummary db.IssueSyncSummary
-	cursor       int
+	jobs          []db.Job
+	issueSummary  db.IssueSyncSummary
+	cursor        int
+	daemonRunning bool
 
 	// Level 2: job detail + session list
 	selected     *db.Job
@@ -109,7 +110,11 @@ type Model struct {
 }
 
 func NewModel(store *db.Store, cfg *config.Config) Model {
-	return Model{store: store, cfg: cfg}
+	return Model{
+		store:         store,
+		cfg:           cfg,
+		daemonRunning: isDaemonRunning(cfg.Daemon.PIDFile),
+	}
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -135,12 +140,19 @@ type actionResultMsg struct {
 	prURL  string
 	warn   string
 }
+type tickMsg struct{}
 type errMsg error
+
+func tick() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return tickMsg{}
+	})
+}
 
 // ── Init / Commands ─────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchJobs, m.fetchIssueSummary)
+	return tea.Batch(m.fetchJobs, m.fetchIssueSummary, tick())
 }
 
 func (m Model) fetchJobs() tea.Msg {
@@ -340,24 +352,13 @@ func (m Model) executeCancel() tea.Msg {
 }
 
 func (m Model) cleanupCancelledJobWorktree(ctx context.Context, job db.Job) error {
-	worktreePath := job.WorktreePath
-	if worktreePath == "" && m.cfg != nil && m.cfg.ReposRoot != "" {
-		worktreePath = filepath.Join(m.cfg.ReposRoot, "worktrees", job.ID)
-	}
-	if worktreePath == "" {
+	if job.WorktreePath == "" {
 		return nil
 	}
-	git.RemoveJobDir(worktreePath)
-	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
-		if err == nil {
-			return fmt.Errorf("worktree path still exists: %s", worktreePath)
-		}
+	if err := os.RemoveAll(job.WorktreePath); err != nil {
 		return err
 	}
-	if job.WorktreePath != "" {
-		return m.store.ClearWorktreePath(ctx, job.ID)
-	}
-	return nil
+	return m.store.ClearWorktreePath(ctx, job.ID)
 }
 
 // buildTUIPRContent assembles PR title and body (mirrors pipeline.BuildPRContent).
@@ -398,9 +399,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+	case tickMsg:
+		m.daemonRunning = isDaemonRunning(m.cfg.Daemon.PIDFile)
+		cmds := []tea.Cmd{m.fetchJobs, m.fetchIssueSummary, tick()}
+		if m.selected != nil && !m.showDiff && m.selectedSession == nil {
+			cmds = append(cmds, m.fetchSessions)
+		}
+		return m, tea.Batch(cmds...)
 	case jobsMsg:
 		m.jobs = msg
 		m.err = nil
+		// Re-sync selected pointer to new slice so keybindings see fresh state.
+		if m.selected != nil {
+			found := false
+			for i := range m.jobs {
+				if m.jobs[i].ID == m.selected.ID {
+					m.selected = &m.jobs[i]
+					found = true
+					break
+				}
+			}
+			if !found {
+				// Job disappeared (deleted); go back to list.
+				m.selected = nil
+				m.sessions = nil
+				m.testArtifact = nil
+				m.sessCursor = 0
+				m.confirmAction = ""
+				m.confirmJobID = ""
+				m.actionErr = nil
+				m.actionWarn = ""
+			}
+		}
 	case issueSummaryMsg:
 		m.issueSummary = db.IssueSyncSummary(msg)
 		m.err = nil
@@ -411,7 +441,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.sessions = msg.sessions
 		m.testArtifact = msg.testArtifact
-		m.sessCursor = 0
+		// Clamp cursor rather than resetting so auto-refresh doesn't jump.
+		maxIdx := len(msg.sessions)
+		if msg.testArtifact != nil {
+			maxIdx++
+		}
+		if maxIdx > 0 && m.sessCursor >= maxIdx {
+			m.sessCursor = maxIdx - 1
+		}
 		m.err = nil
 	case sessionMsg:
 		if m.selected == nil || m.selected.ID != msg.jobID {
@@ -546,10 +583,7 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 		}
 	case "c":
 		if m.cursor < len(m.jobs) && db.IsCancellableState(m.jobs[m.cursor].State) {
-			m.confirmAction = "cancel"
-			m.confirmJobID = m.jobs[m.cursor].ID
-			m.actionErr = nil
-			m.actionWarn = ""
+			startConfirm(&m, "cancel", m.jobs[m.cursor].ID)
 		}
 	case "r":
 		return m, tea.Batch(m.fetchJobs, m.fetchIssueSummary)
@@ -631,31 +665,19 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		}
 	case "a":
 		if m.selected != nil && m.selected.State == "ready" {
-			m.confirmAction = "approve"
-			m.confirmJobID = m.selected.ID
-			m.actionErr = nil
-			m.actionWarn = ""
+			startConfirm(&m, "approve", m.selected.ID)
 		}
 	case "x":
 		if m.selected != nil && m.selected.State == "ready" {
-			m.confirmAction = "reject"
-			m.confirmJobID = m.selected.ID
-			m.actionErr = nil
-			m.actionWarn = ""
+			startConfirm(&m, "reject", m.selected.ID)
 		}
 	case "R":
 		if m.selected != nil && (m.selected.State == "failed" || m.selected.State == "rejected" || m.selected.State == "cancelled") {
-			m.confirmAction = "retry"
-			m.confirmJobID = m.selected.ID
-			m.actionErr = nil
-			m.actionWarn = ""
+			startConfirm(&m, "retry", m.selected.ID)
 		}
 	case "c":
 		if m.selected != nil && db.IsCancellableState(m.selected.State) {
-			m.confirmAction = "cancel"
-			m.confirmJobID = m.selected.ID
-			m.actionErr = nil
-			m.actionWarn = ""
+			startConfirm(&m, "cancel", m.selected.ID)
 		}
 	case "esc":
 		m.selected = nil
@@ -870,7 +892,7 @@ func (m Model) listView() string {
 	// ── Dashboard status — one row per stat ──
 	daemonDot := dotStopped
 	daemonLabel := "stopped"
-	if isDaemonRunning(m.cfg.Daemon.PIDFile) {
+	if m.daemonRunning {
 		daemonDot = dotRunning
 		daemonLabel = "running"
 	}
@@ -1443,17 +1465,15 @@ func (m Model) scrollHeight() int {
 	return h
 }
 
+func startConfirm(m *Model, action, jobID string) {
+	m.confirmAction = action
+	m.confirmJobID = jobID
+	m.actionErr = nil
+	m.actionWarn = ""
+}
+
 func (m Model) confirmTargetJobID() string {
-	if m.confirmJobID != "" {
-		return m.confirmJobID
-	}
-	if m.selected != nil {
-		return m.selected.ID
-	}
-	if m.cursor < len(m.jobs) {
-		return m.jobs[m.cursor].ID
-	}
-	return ""
+	return m.confirmJobID
 }
 
 func (m Model) confirmPrompt() string {

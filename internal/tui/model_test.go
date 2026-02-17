@@ -219,6 +219,119 @@ func newTestModelWithQueuedJob(t *testing.T, tmp string) (Model, *db.Store, stri
 	return m, store, jobID
 }
 
+// transitionToReviewing moves a job from queued → planning → implementing → reviewing.
+func transitionToReviewing(t *testing.T, store *db.Store, jobID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, tr := range [][2]string{{"queued", "planning"}, {"planning", "implementing"}, {"implementing", "reviewing"}} {
+		if err := store.TransitionState(ctx, jobID, tr[0], tr[1]); err != nil {
+			t.Fatalf("transition %s→%s: %v", tr[0], tr[1], err)
+		}
+	}
+}
+
 func keyRunes(r rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func TestTickMsgTriggersJobRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	modelAny, cmd := m.Update(tickMsg{})
+	m = modelAny.(Model)
+
+	if cmd == nil {
+		t.Fatalf("expected tick to return a batch command")
+	}
+}
+
+func TestSelectedSyncsAfterJobsMsg(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	m, store, jobID := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	// Select the job (simulates user navigating into detail view).
+	m.selected = &m.jobs[0]
+	if m.selected.State != "queued" {
+		t.Fatalf("expected queued, got %q", m.selected.State)
+	}
+
+	// Transition job to "reviewing" via valid state machine path.
+	transitionToReviewing(t, store, jobID)
+
+	// Simulate a jobsMsg arriving (as auto-refresh would deliver).
+	jobs, err := store.ListJobs(ctx, "", "all")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	modelAny, _ := m.Update(jobsMsg(jobs))
+	m = modelAny.(Model)
+
+	if m.selected == nil {
+		t.Fatalf("expected selected to remain set")
+	}
+	if m.selected.State != "reviewing" {
+		t.Fatalf("expected selected state to be reviewing, got %q", m.selected.State)
+	}
+}
+
+func TestCancelOnReviewingStateJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	m, store, jobID := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	// Move job to "reviewing" via valid state machine path.
+	transitionToReviewing(t, store, jobID)
+
+	jobs, err := store.ListJobs(ctx, "", "all")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	m.jobs = jobs
+	m.selected = &m.jobs[0]
+
+	// Verify cancel hint shows in detail view.
+	view := m.detailView()
+	if !strings.Contains(view, "c cancel") {
+		t.Fatalf("expected cancel hint for reviewing job, got:\n%s", view)
+	}
+
+	// Press c then y to cancel.
+	modelAny, _ := m.handleKey(keyRunes('c'))
+	m = modelAny.(Model)
+	if m.confirmAction != "cancel" {
+		t.Fatalf("expected confirmAction=cancel, got %q", m.confirmAction)
+	}
+	modelAny, cmd := m.handleKey(keyRunes('y'))
+	m = modelAny.(Model)
+	if cmd == nil {
+		t.Fatalf("expected execute cancel command")
+	}
+
+	msg := cmd()
+	modelAny, refreshCmd := m.Update(msg)
+	m = modelAny.(Model)
+	if refreshCmd != nil {
+		msg = refreshCmd()
+		modelAny, _ = m.Update(msg)
+		m = modelAny.(Model)
+	}
+
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "cancelled" {
+		t.Fatalf("expected cancelled, got %q", job.State)
+	}
 }
