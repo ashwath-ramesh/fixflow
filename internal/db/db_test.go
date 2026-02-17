@@ -622,3 +622,443 @@ func TestGetIssueSyncSummaryNoRows(t *testing.T) {
 		t.Fatalf("unexpected missing-project summary: %+v", projectSummary)
 	}
 }
+
+func TestTransitionToCancelledFromCancellableStates(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	tests := []struct {
+		name       string
+		targetFrom string
+		setup      func(t *testing.T, store *Store, jobID string)
+	}{
+		{name: "queued", targetFrom: "queued"},
+		{
+			name:       "planning",
+			targetFrom: "planning",
+			setup: func(t *testing.T, store *Store, jobID string) {
+				t.Helper()
+				claimed, err := store.ClaimJob(ctx)
+				if err != nil || claimed != jobID {
+					t.Fatalf("claim: id=%q err=%v", claimed, err)
+				}
+			},
+		},
+		{
+			name:       "implementing",
+			targetFrom: "implementing",
+			setup: func(t *testing.T, store *Store, jobID string) {
+				t.Helper()
+				claimed, err := store.ClaimJob(ctx)
+				if err != nil || claimed != jobID {
+					t.Fatalf("claim: id=%q err=%v", claimed, err)
+				}
+				if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
+					t.Fatalf("planning->implementing: %v", err)
+				}
+			},
+		},
+		{
+			name:       "reviewing",
+			targetFrom: "reviewing",
+			setup: func(t *testing.T, store *Store, jobID string) {
+				t.Helper()
+				claimed, err := store.ClaimJob(ctx)
+				if err != nil || claimed != jobID {
+					t.Fatalf("claim: id=%q err=%v", claimed, err)
+				}
+				if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
+					t.Fatalf("planning->implementing: %v", err)
+				}
+				if err := store.TransitionState(ctx, jobID, "implementing", "reviewing"); err != nil {
+					t.Fatalf("implementing->reviewing: %v", err)
+				}
+			},
+		},
+		{
+			name:       "testing",
+			targetFrom: "testing",
+			setup: func(t *testing.T, store *Store, jobID string) {
+				t.Helper()
+				claimed, err := store.ClaimJob(ctx)
+				if err != nil || claimed != jobID {
+					t.Fatalf("claim: id=%q err=%v", claimed, err)
+				}
+				if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
+					t.Fatalf("planning->implementing: %v", err)
+				}
+				if err := store.TransitionState(ctx, jobID, "implementing", "reviewing"); err != nil {
+					t.Fatalf("implementing->reviewing: %v", err)
+				}
+				if err := store.TransitionState(ctx, jobID, "reviewing", "testing"); err != nil {
+					t.Fatalf("reviewing->testing: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+				ProjectName:   "myproject",
+				Source:        "github",
+				SourceIssueID: "cancel-" + tc.name,
+				Title:         "cancel state " + tc.name,
+				URL:           "https://github.com/org/repo/issues/" + tc.name,
+				State:         "open",
+			})
+			if err != nil {
+				t.Fatalf("upsert issue: %v", err)
+			}
+			jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+			if err != nil {
+				t.Fatalf("create job: %v", err)
+			}
+			if tc.setup != nil {
+				tc.setup(t, store, jobID)
+			}
+			if err := store.TransitionState(ctx, jobID, tc.targetFrom, "cancelled"); err != nil {
+				t.Fatalf("%s->cancelled: %v", tc.targetFrom, err)
+			}
+		})
+	}
+}
+
+func TestCancelJobRejectsTerminalState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "cancel-terminal",
+		Title:         "cancel terminal",
+		URL:           "https://github.com/org/repo/issues/300",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil || claimedID != jobID {
+		t.Fatalf("claim: id=%q err=%v", claimedID, err)
+	}
+	if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
+		t.Fatalf("planning->implementing: %v", err)
+	}
+	if err := store.TransitionState(ctx, jobID, "implementing", "reviewing"); err != nil {
+		t.Fatalf("implementing->reviewing: %v", err)
+	}
+	if err := store.TransitionState(ctx, jobID, "reviewing", "testing"); err != nil {
+		t.Fatalf("reviewing->testing: %v", err)
+	}
+	if err := store.TransitionState(ctx, jobID, "testing", "ready"); err != nil {
+		t.Fatalf("testing->ready: %v", err)
+	}
+
+	err = store.CancelJob(ctx, jobID)
+	if err == nil {
+		t.Fatalf("expected cancel error for ready job")
+	}
+	if !strings.Contains(err.Error(), "cannot be cancelled") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResetJobForRetryFromCancelled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "retry-cancelled",
+		Title:         "retry cancelled",
+		URL:           "https://github.com/org/repo/issues/301",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := store.CancelJob(ctx, jobID); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+
+	if err := store.ResetJobForRetry(ctx, jobID, "retry after cancel"); err != nil {
+		t.Fatalf("reset for retry: %v", err)
+	}
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "queued" {
+		t.Fatalf("expected queued, got %q", job.State)
+	}
+}
+
+func TestHasActiveJobForIssueIgnoresCancelled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "active-cancelled",
+		Title:         "active cancelled",
+		URL:           "https://github.com/org/repo/issues/302",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	active, err := store.HasActiveJobForIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("check active before cancel: %v", err)
+	}
+	if !active {
+		t.Fatalf("expected active before cancel")
+	}
+
+	if err := store.CancelJob(ctx, jobID); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+	active, err = store.HasActiveJobForIssue(ctx, issueID)
+	if err != nil {
+		t.Fatalf("check active after cancel: %v", err)
+	}
+	if active {
+		t.Fatalf("expected inactive after cancel")
+	}
+}
+
+func TestListCleanableJobsIncludesCancelled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "clean-cancelled",
+		Title:         "clean cancelled",
+		URL:           "https://github.com/org/repo/issues/303",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := store.UpdateJobField(ctx, jobID, "worktree_path", filepath.Join(tmp, "wt")); err != nil {
+		t.Fatalf("set worktree path: %v", err)
+	}
+	if err := store.CancelJob(ctx, jobID); err != nil {
+		t.Fatalf("cancel job: %v", err)
+	}
+
+	jobs, err := store.ListCleanableJobs(ctx)
+	if err != nil {
+		t.Fatalf("list cleanable jobs: %v", err)
+	}
+	found := false
+	for _, j := range jobs {
+		if j.ID == jobID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected cancelled job in cleanable list")
+	}
+}
+
+func TestCancelAllCancellableJobs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	makeJob := func(sourceID string) string {
+		t.Helper()
+		issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+			ProjectName:   "myproject",
+			Source:        "github",
+			SourceIssueID: sourceID,
+			Title:         "bulk cancel " + sourceID,
+			URL:           "https://github.com/org/repo/issues/" + sourceID,
+			State:         "open",
+		})
+		if err != nil {
+			t.Fatalf("upsert issue: %v", err)
+		}
+		jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		return jobID
+	}
+
+	queuedID := makeJob("401")
+	planningID := makeJob("402")
+	readyID := makeJob("403")
+
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim #1: %v", err)
+	}
+	if claimedID != queuedID {
+		t.Fatalf("expected first claimed %q, got %q", queuedID, claimedID)
+	}
+	claimedID, err = store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim #2: %v", err)
+	}
+	if claimedID != planningID {
+		t.Fatalf("expected second claimed %q, got %q", planningID, claimedID)
+	}
+	if err := store.TransitionState(ctx, readyID, "queued", "planning"); err != nil {
+		t.Fatalf("ready prep queued->planning: %v", err)
+	}
+	if err := store.TransitionState(ctx, readyID, "planning", "implementing"); err != nil {
+		t.Fatalf("ready prep planning->implementing: %v", err)
+	}
+	if err := store.TransitionState(ctx, readyID, "implementing", "reviewing"); err != nil {
+		t.Fatalf("ready prep implementing->reviewing: %v", err)
+	}
+	if err := store.TransitionState(ctx, readyID, "reviewing", "testing"); err != nil {
+		t.Fatalf("ready prep reviewing->testing: %v", err)
+	}
+	if err := store.TransitionState(ctx, readyID, "testing", "ready"); err != nil {
+		t.Fatalf("ready prep testing->ready: %v", err)
+	}
+
+	cancelledIDs, err := store.CancelAllCancellableJobs(ctx)
+	if err != nil {
+		t.Fatalf("cancel all: %v", err)
+	}
+	if len(cancelledIDs) != 2 {
+		t.Fatalf("expected 2 cancelled jobs, got %d", len(cancelledIDs))
+	}
+
+	for _, id := range []string{queuedID, planningID} {
+		job, err := store.GetJob(ctx, id)
+		if err != nil {
+			t.Fatalf("get cancelled job: %v", err)
+		}
+		if job.State != "cancelled" {
+			t.Fatalf("expected cancelled state for %s, got %q", id, job.State)
+		}
+	}
+	readyJob, err := store.GetJob(ctx, readyID)
+	if err != nil {
+		t.Fatalf("get ready job: %v", err)
+	}
+	if readyJob.State != "ready" {
+		t.Fatalf("expected ready to remain ready, got %q", readyJob.State)
+	}
+}
+
+func TestMarkRunningSessionsCancelledAndCompleteSessionRace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "session-cancel",
+		Title:         "session cancel",
+		URL:           "https://github.com/org/repo/issues/500",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	sessionID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if err := store.MarkRunningSessionsCancelled(ctx, jobID); err != nil {
+		t.Fatalf("mark running sessions cancelled: %v", err)
+	}
+
+	if err := store.CompleteSession(ctx, sessionID, "failed", "", "", "", "", "", "should not overwrite", 0, 0, 1); err != nil {
+		t.Fatalf("complete session after cancel should no-op: %v", err)
+	}
+
+	sessions, err := store.ListSessionsByJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Status != "cancelled" {
+		t.Fatalf("expected cancelled session status, got %q", sessions[0].Status)
+	}
+}

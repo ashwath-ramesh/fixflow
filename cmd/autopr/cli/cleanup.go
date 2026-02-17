@@ -14,7 +14,7 @@ var cleanupDryRun bool
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Remove worktree directories for completed, rejected, and failed jobs",
+	Short: "Remove worktree directories for completed, rejected, failed, and cancelled jobs",
 	RunE:  runCleanup,
 }
 

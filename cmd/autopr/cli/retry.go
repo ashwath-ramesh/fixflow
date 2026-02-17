@@ -10,7 +10,7 @@ var retryNotes string
 
 var retryCmd = &cobra.Command{
 	Use:   "retry <job-id>",
-	Short: "Retry a failed or rejected job",
+	Short: "Retry a failed, rejected, or cancelled job",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runRetry,
 }
@@ -41,8 +41,8 @@ func runRetry(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if job.State != "failed" && job.State != "rejected" {
-		return fmt.Errorf("job %s is in state %q, must be 'failed' or 'rejected' to retry", jobID, job.State)
+	if job.State != "failed" && job.State != "rejected" && job.State != "cancelled" {
+		return fmt.Errorf("job %s is in state %q, must be 'failed', 'rejected', or 'cancelled' to retry", jobID, job.State)
 	}
 
 	if err := store.ResetJobForRetry(cmd.Context(), jobID, retryNotes); err != nil {

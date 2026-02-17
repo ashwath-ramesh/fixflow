@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -223,12 +224,18 @@ func (r *Runner) runTests(ctx context.Context, jobID string, issue db.Issue, pro
 	}
 
 	if testErr != nil {
+		if errors.Is(testErr, context.Canceled) || ctx.Err() != nil {
+			return context.Canceled
+		}
 		slog.Info("tests failed", "job", jobID, "err", testErr)
 		return errTestsFailed
 	}
 
 	// Push branch.
 	if err := git.PushBranch(ctx, workDir, job.BranchName); err != nil {
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return context.Canceled
+		}
 		slog.Warn("push failed", "err", err)
 	}
 
@@ -260,5 +267,8 @@ func runTestCommand(ctx context.Context, dir, testCmd string) (string, error) {
 		output = output[:100000] + "\n... (truncated)"
 	}
 
+	if err != nil && ctx.Err() != nil {
+		return output, context.Canceled
+	}
 	return output, err
 }

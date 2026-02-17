@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"autopr/internal/config"
 	"autopr/internal/db"
@@ -20,22 +21,38 @@ var errReviewChangesRequested = errors.New("code review requested changes")
 // errTestsFailed signals that tests failed and the job should retry from implementing.
 var errTestsFailed = errors.New("tests failed")
 
+// errJobCancelled signals that a job was explicitly cancelled by the user.
+var errJobCancelled = errors.New("job cancelled")
+
 // Runner orchestrates the full pipeline for a job.
 type Runner struct {
-	store    *db.Store
-	provider llm.Provider
-	cfg      *config.Config
+	store       *db.Store
+	provider    llm.Provider
+	cfg         *config.Config
+	cloneForJob func(ctx context.Context, repoURL, token, destPath, branchName, baseBranch string) error
 }
 
 func New(store *db.Store, provider llm.Provider, cfg *config.Config) *Runner {
-	return &Runner{store: store, provider: provider, cfg: cfg}
+	return &Runner{
+		store:       store,
+		provider:    provider,
+		cfg:         cfg,
+		cloneForJob: git.CloneForJob,
+	}
 }
 
 // Run processes a job through the pipeline: plan -> implement <-> review -> tests -> ready.
 func (r *Runner) Run(ctx context.Context, jobID string) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	go r.watchForJobCancellation(runCtx, jobID, cancelRun)
+
 	job, err := r.store.GetJob(ctx, jobID)
 	if err != nil {
 		return err
+	}
+	if job.State == "cancelled" {
+		return nil
 	}
 
 	issue, err := r.store.GetIssueByAPID(ctx, job.AutoPRIssueID)
@@ -56,24 +73,41 @@ func (r *Runner) Run(ctx context.Context, jobID string) error {
 	worktreePath := filepath.Join(r.cfg.ReposRoot, "worktrees", jobID)
 
 	if job.WorktreePath == "" {
-		if err := git.CloneForJob(ctx, projectCfg.RepoURL, token, worktreePath, branchName, projectCfg.BaseBranch); err != nil {
+		if err := r.store.UpdateJobField(ctx, jobID, "worktree_path", worktreePath); err != nil {
+			if r.jobCancelled(jobID) {
+				return r.onJobCancelled(jobID)
+			}
+			return r.failJob(ctx, jobID, job.State, "set worktree path: "+err.Error())
+		}
+		if err := r.store.UpdateJobField(ctx, jobID, "branch_name", branchName); err != nil {
+			if r.jobCancelled(jobID) {
+				return r.onJobCancelled(jobID)
+			}
+			return r.failJob(ctx, jobID, job.State, "set branch name: "+err.Error())
+		}
+
+		if err := r.cloneForJob(runCtx, projectCfg.RepoURL, token, worktreePath, branchName, projectCfg.BaseBranch); err != nil {
+			if r.isJobCancelledError(runCtx, jobID, err) {
+				return r.onJobCancelled(jobID)
+			}
 			return r.failJob(ctx, jobID, job.State, "clone for job: "+err.Error())
 		}
-		_ = r.store.UpdateJobField(ctx, jobID, "worktree_path", worktreePath)
-		_ = r.store.UpdateJobField(ctx, jobID, "branch_name", branchName)
 	} else {
 		worktreePath = job.WorktreePath
 		branchName = job.BranchName
 	}
 
 	// Run pipeline steps based on current state.
-	if err := r.runSteps(ctx, jobID, job.State, issue, projectCfg, worktreePath); err != nil {
+	if err := r.runSteps(runCtx, jobID, job.State, issue, projectCfg, worktreePath); err != nil {
+		if errors.Is(err, errJobCancelled) {
+			return r.onJobCancelled(jobID)
+		}
 		return err
 	}
 
 	// Auto-create PR if configured.
 	if r.cfg.Daemon.AutoPR {
-		return r.maybeAutoPR(ctx, jobID, issue, projectCfg)
+		return r.maybeAutoPR(runCtx, jobID, issue, projectCfg)
 	}
 
 	return nil
@@ -95,13 +129,22 @@ func (r *Runner) runSteps(ctx context.Context, jobID, currentState string, issue
 		if currentState != step.state {
 			continue
 		}
+		if r.jobCancelled(jobID) {
+			return errJobCancelled
+		}
 
 		slog.Info("running step", "job", jobID, "step", db.StepForState(step.state))
 
 		if err := step.run(ctx, jobID, issue, projectCfg, workDir); err != nil {
+			if r.isJobCancelledError(ctx, jobID, err) {
+				return errJobCancelled
+			}
 			// Code review requested changes — loop back to implementing.
 			if errors.Is(err, errReviewChangesRequested) {
 				if err := r.store.TransitionState(ctx, jobID, "reviewing", "implementing"); err != nil {
+					if r.jobCancelled(jobID) {
+						return errJobCancelled
+					}
 					return err
 				}
 				return r.handleRetryLoop(ctx, jobID, issue, projectCfg, workDir)
@@ -110,15 +153,24 @@ func (r *Runner) runSteps(ctx context.Context, jobID, currentState string, issue
 			if errors.Is(err, errTestsFailed) {
 				slog.Info("tests failed, looping back to implement", "job", jobID)
 				if err := r.store.TransitionState(ctx, jobID, "testing", "implementing"); err != nil {
+					if r.jobCancelled(jobID) {
+						return errJobCancelled
+					}
 					return err
 				}
 				return r.handleRetryLoop(ctx, jobID, issue, projectCfg, workDir)
 			}
 			return r.failJob(ctx, jobID, step.state, err.Error())
 		}
+		if r.jobCancelled(jobID) {
+			return errJobCancelled
+		}
 
 		// Transition to next state.
 		if err := r.store.TransitionState(ctx, jobID, step.state, step.next); err != nil {
+			if r.jobCancelled(jobID) {
+				return errJobCancelled
+			}
 			return err
 		}
 		currentState = step.next
@@ -128,6 +180,9 @@ func (r *Runner) runSteps(ctx context.Context, jobID, currentState string, issue
 }
 
 func (r *Runner) handleRetryLoop(ctx context.Context, jobID string, issue db.Issue, projectCfg *config.ProjectConfig, workDir string) error {
+	if r.jobCancelled(jobID) {
+		return errJobCancelled
+	}
 	job, err := r.store.GetJob(ctx, jobID)
 	if err != nil {
 		return err
@@ -135,11 +190,16 @@ func (r *Runner) handleRetryLoop(ctx context.Context, jobID string, issue db.Iss
 
 	if job.Iteration >= job.MaxIterations {
 		slog.Info("max iterations reached, moving to ready for human review", "job", jobID, "iterations", job.Iteration)
-		_ = r.store.TransitionState(ctx, jobID, job.State, "ready")
+		if err := r.store.TransitionState(ctx, jobID, job.State, "ready"); err != nil && !r.jobCancelled(jobID) {
+			return err
+		}
 		return nil
 	}
 
 	if err := r.store.IncrementIteration(ctx, jobID); err != nil {
+		if r.jobCancelled(jobID) {
+			return errJobCancelled
+		}
 		return err
 	}
 
@@ -165,16 +225,68 @@ func (r *Runner) invokeProvider(ctx context.Context, jobID, step string, iterati
 	status := "completed"
 	errMsg := ""
 	if runErr != nil {
-		status = "failed"
-		errMsg = runErr.Error()
+		if r.isJobCancelledError(ctx, jobID, runErr) {
+			status = "cancelled"
+			errMsg = "cancelled"
+		} else {
+			status = "failed"
+			errMsg = runErr.Error()
+		}
 	}
 
 	_ = r.store.CompleteSession(ctx, sessionID, status, resp.Text, prompt, "", resp.JSONLPath, resp.CommitSHA, errMsg, resp.InputTokens, resp.OutputTokens, resp.DurationMS)
 
 	if runErr != nil {
+		if status == "cancelled" {
+			return resp, errJobCancelled
+		}
 		return resp, runErr
 	}
 	return resp, nil
+}
+
+func (r *Runner) watchForJobCancellation(ctx context.Context, jobID string, cancel context.CancelFunc) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if r.jobCancelled(jobID) {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (r *Runner) jobCancelled(jobID string) bool {
+	job, err := r.store.GetJob(context.Background(), jobID)
+	if err != nil {
+		return false
+	}
+	return job.State == "cancelled"
+}
+
+func (r *Runner) isJobCancelledError(ctx context.Context, jobID string, err error) bool {
+	if !r.jobCancelled(jobID) {
+		return false
+	}
+	if errors.Is(err, errJobCancelled) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "killed")
+}
+
+func (r *Runner) onJobCancelled(jobID string) error {
+	_ = r.store.MarkRunningSessionsCancelled(context.Background(), jobID)
+	return nil
 }
 
 func (r *Runner) maybeAutoPR(ctx context.Context, jobID string, issue db.Issue, projectCfg *config.ProjectConfig) error {

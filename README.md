@@ -192,7 +192,8 @@ log_file = "/custom/path/autopr.log"
 | `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
 | `ap approve <job-id>` | Approve a job and create PR |
 | `ap reject <job-id> [-r reason]` | Reject a job |
-| `ap retry <job-id> [-n notes]` | Re-queue a failed/rejected job |
+| `ap cancel <job-id> \| --all` | Cancel a queued/running job (or all) |
+| `ap retry <job-id> [-n notes]` | Re-queue a failed/rejected/cancelled job |
 | `ap config` | Open config in `$EDITOR` |
 | `ap paths` | Show where files are stored |
 | `ap tui` | Interactive terminal dashboard |
@@ -235,6 +236,7 @@ code blocks (via glamour). Press `tab` to toggle between the input prompt and ou
 | `esc` | Go back one level |
 | `tab` | Toggle input/output (session view) |
 | `d` | View git diff (job detail) |
+| `c` | Cancel selected/current job (list/detail) |
 | `u/d` | Half-page scroll (session/diff view) |
 | `r` | Refresh data |
 | `q` | Quit |
@@ -251,6 +253,11 @@ stateDiagram-v2
     reviewing --> testing : approved
     testing --> implementing : tests failed
     testing --> ready : tests pass
+    queued --> cancelled : ap cancel
+    planning --> cancelled : ap cancel
+    implementing --> cancelled : ap cancel
+    reviewing --> cancelled : ap cancel
+    testing --> cancelled : ap cancel
     ready --> approved : ap approve / auto_pr
     ready --> rejected : ap reject
     planning --> failed
@@ -259,6 +266,7 @@ stateDiagram-v2
     testing --> failed
     failed --> queued : ap retry
     rejected --> queued : ap retry
+    cancelled --> queued : ap retry
 ```
 
 ## Custom Prompts

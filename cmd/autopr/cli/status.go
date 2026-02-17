@@ -88,8 +88,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		`SELECT COUNT(*) FROM jobs WHERE state = 'approved' AND pr_merged_at IS NOT NULL AND pr_merged_at != ''`).Scan(&merged)
 	prCreated := counts["approved"] - merged
 
-	fmt.Printf("Jobs: queued=%d planning=%d implementing=%d reviewing=%d testing=%d awaiting_approval=%d failed=%d pr_created=%d merged=%d rejected=%d\n",
+	fmt.Printf("Jobs: queued=%d planning=%d implementing=%d reviewing=%d testing=%d awaiting_approval=%d failed=%d cancelled=%d pr_created=%d merged=%d rejected=%d\n",
 		counts["queued"], counts["planning"], counts["implementing"], counts["reviewing"],
-		counts["testing"], counts["ready"], counts["failed"], prCreated, merged, counts["rejected"])
+		counts["testing"], counts["ready"], counts["failed"], counts["cancelled"], prCreated, merged, counts["rejected"])
 	return nil
 }

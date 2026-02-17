@@ -11,14 +11,25 @@ import (
 
 // ValidTransitions defines the allowed state machine transitions.
 var ValidTransitions = map[string][]string{
-	"queued":       {"planning"},
-	"planning":     {"implementing", "failed"},
-	"implementing": {"reviewing", "failed"},
-	"reviewing":    {"implementing", "testing", "failed"},
-	"testing":      {"ready", "implementing", "failed"},
+	"queued":       {"planning", "cancelled"},
+	"planning":     {"implementing", "failed", "cancelled"},
+	"implementing": {"reviewing", "failed", "cancelled"},
+	"reviewing":    {"implementing", "testing", "failed", "cancelled"},
+	"testing":      {"ready", "implementing", "failed", "cancelled"},
 	"ready":        {"approved", "rejected"},
 	"failed":       {"queued"},
 	"rejected":     {"queued"},
+	"cancelled":    {"queued"},
+}
+
+// IsCancellableState reports whether a job can be cancelled.
+func IsCancellableState(state string) bool {
+	switch state {
+	case "queued", "planning", "implementing", "reviewing", "testing":
+		return true
+	default:
+		return false
+	}
 }
 
 // StepForState derives the pipeline step name from job state.
@@ -160,7 +171,7 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 		return fmt.Errorf("invalid transition: %s -> %s", from, to)
 	}
 	extra := ""
-	if to == "approved" || to == "rejected" || to == "ready" || to == "failed" {
+	if to == "approved" || to == "rejected" || to == "ready" || to == "failed" || to == "cancelled" {
 		extra = ", completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 	}
 	q := fmt.Sprintf(`UPDATE jobs SET state = ?, updated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', 'now')%s WHERE id = ? AND state = ?`, extra)
@@ -274,14 +285,14 @@ func (s *Store) IncrementIteration(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// ResetJobForRetry resets a job to queued with fresh state.
+// ResetJobForRetry resets a failed/rejected/cancelled job to queued with fresh state.
 func (s *Store) ResetJobForRetry(ctx context.Context, jobID, notes string) error {
 	res, err := s.Writer.ExecContext(ctx, `
 UPDATE jobs SET state = 'queued', iteration = 0, worktree_path = NULL, branch_name = NULL,
                commit_sha = NULL, error_message = NULL, human_notes = ?,
                started_at = NULL, completed_at = NULL,
                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = ? AND state IN ('failed', 'rejected')
+WHERE id = ? AND state IN ('failed', 'rejected', 'cancelled')
   AND EXISTS (
     SELECT 1 FROM issues i
     WHERE i.autopr_issue_id = jobs.autopr_issue_id AND i.eligible = 1
@@ -306,6 +317,75 @@ WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason)
 			return fmt.Errorf("job %s cannot be retried: issue ineligible", jobID)
 		}
 		return fmt.Errorf("job %s cannot be retried from current state", jobID)
+	}
+	return nil
+}
+
+// CancelJob transitions a single job to cancelled when currently cancellable.
+func (s *Store) CancelJob(ctx context.Context, jobID string) error {
+	res, err := s.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET state = 'cancelled',
+    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ? AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')`, jobID)
+	if err != nil {
+		return fmt.Errorf("cancel job %s: %w", jobID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		return nil
+	}
+
+	var state string
+	err = s.Reader.QueryRowContext(ctx, `SELECT state FROM jobs WHERE id = ?`, jobID).Scan(&state)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	if err != nil {
+		return fmt.Errorf("load job %s state: %w", jobID, err)
+	}
+	return fmt.Errorf("job %s is in state %q and cannot be cancelled", jobID, state)
+}
+
+// CancelAllCancellableJobs cancels all jobs currently in cancellable states.
+func (s *Store) CancelAllCancellableJobs(ctx context.Context) ([]string, error) {
+	rows, err := s.Writer.QueryContext(ctx, `
+UPDATE jobs
+SET state = 'cancelled',
+    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')
+RETURNING id`)
+	if err != nil {
+		return nil, fmt.Errorf("cancel all jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan cancelled job id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collect cancelled job ids: %w", err)
+	}
+	return ids, nil
+}
+
+// MarkRunningSessionsCancelled marks any running LLM sessions for a job as cancelled.
+func (s *Store) MarkRunningSessionsCancelled(ctx context.Context, jobID string) error {
+	_, err := s.Writer.ExecContext(ctx, `
+UPDATE llm_sessions
+SET status = 'cancelled',
+    error_message = CASE WHEN error_message IS NULL OR error_message = '' THEN 'cancelled' ELSE error_message END,
+    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE job_id = ? AND status = 'running'`, jobID)
+	if err != nil {
+		return fmt.Errorf("mark running sessions cancelled for %s: %w", jobID, err)
 	}
 	return nil
 }
@@ -372,7 +452,7 @@ ORDER BY j.updated_at DESC`
 }
 
 // ListCleanableJobs returns jobs whose worktrees can be safely removed:
-// rejected/failed jobs, and approved jobs where the PR has been merged or closed.
+// rejected/failed/cancelled jobs, and approved jobs where the PR has been merged or closed.
 func (s *Store) ListCleanableJobs(ctx context.Context) ([]Job, error) {
 	const q = `
 SELECT id, autopr_issue_id, project_name, state, iteration, max_iterations,
@@ -383,7 +463,7 @@ SELECT id, autopr_issue_id, project_name, state, iteration, max_iterations,
 FROM jobs
 WHERE worktree_path IS NOT NULL AND worktree_path != ''
   AND (
-    state IN ('rejected', 'failed')
+    state IN ('rejected', 'failed', 'cancelled')
     OR (state = 'approved' AND pr_merged_at IS NOT NULL AND pr_merged_at != '')
     OR (state = 'approved' AND pr_closed_at IS NOT NULL AND pr_closed_at != '')
   )
@@ -426,7 +506,7 @@ func (s *Store) ClearWorktreePath(ctx context.Context, jobID string) error {
 // Returns true if there's a job in progress OR an approved job whose PR hasn't been merged/closed.
 func (s *Store) HasActiveJobForIssue(ctx context.Context, autoprIssueID string) (bool, error) {
 	const q = `SELECT COUNT(*) FROM jobs WHERE autopr_issue_id = ? AND (
-		state NOT IN ('approved', 'rejected', 'failed')
+		state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
 		OR (state = 'approved' AND pr_url != '' AND (pr_merged_at IS NULL OR pr_merged_at = '') AND (pr_closed_at IS NULL OR pr_closed_at = ''))
 	)`
 	var count int
@@ -469,15 +549,17 @@ func (s *Store) CreateSession(ctx context.Context, jobID, step string, iteration
 }
 
 func (s *Store) CompleteSession(ctx context.Context, sessionID int64, status, responseText, promptText, promptHash, jsonlPath, commitSHA, errMsg string, inputTokens, outputTokens, durationMS int) error {
-	_, err := s.Writer.ExecContext(ctx, `
+	res, err := s.Writer.ExecContext(ctx, `
 UPDATE llm_sessions SET status = ?, response_text = ?, prompt_text = ?, prompt_hash = ?, jsonl_path = ?,
                        commit_sha = ?, error_message = ?, input_tokens = ?, output_tokens = ?,
                        duration_ms = ?, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = ?`,
+WHERE id = ? AND status = 'running'`,
 		status, responseText, promptText, promptHash, jsonlPath, commitSHA, errMsg, inputTokens, outputTokens, durationMS, sessionID)
 	if err != nil {
 		return fmt.Errorf("complete session %d: %w", sessionID, err)
 	}
+	// Session may already be terminal (e.g. cancelled by user). Treat as no-op.
+	_, _ = res.RowsAffected()
 	return nil
 }
 
