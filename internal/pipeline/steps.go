@@ -144,27 +144,12 @@ func (r *Runner) runImplement(ctx context.Context, jobID string, issue db.Issue,
 		"review_feedback": reviewFeedback,
 	})
 
-	resp, err := r.invokeProvider(ctx, jobID, "implement", job.Iteration, workDir, prompt)
+	_, err = r.invokeProvider(ctx, jobID, "implement", job.Iteration, workDir, prompt)
 	if err != nil {
 		return fmt.Errorf("implement step: %w", err)
 	}
 
-	// Commit any uncommitted changes the LLM left behind.
-	// LLM tools often edit files but don't always run git commit.
-	commitMsg := fmt.Sprintf("fixflow: implement %s (iteration %d)", issue.Title, job.Iteration)
-	sha, commitErr := git.CommitAll(ctx, workDir, commitMsg)
-	if commitErr != nil {
-		// If nothing to commit, use the SHA from the provider (if any) or existing HEAD.
-		if resp.CommitSHA != "" {
-			sha = resp.CommitSHA
-		}
-	}
-
-	if sha != "" {
-		_ = r.store.UpdateJobField(ctx, jobID, "commit_sha", sha)
-	}
-
-	slog.Info("implement step completed", "job", jobID, "commit", sha)
+	slog.Info("implement step completed", "job", jobID)
 	return nil
 }
 

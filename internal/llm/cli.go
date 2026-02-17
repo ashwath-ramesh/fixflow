@@ -27,8 +27,9 @@ func (p *CLIProvider) Name() string { return p.name }
 func (p *CLIProvider) Run(ctx context.Context, workDir, prompt string) (Response, error) {
 	start := time.Now()
 
-	// Create temp file for JSONL output.
-	jsonlDir := filepath.Join(workDir, ".fixflow-sessions")
+	// Store JSONL outside the work dir so it doesn't pollute git status,
+	// but in a persistent location so the TUI can display session details.
+	jsonlDir := filepath.Join(filepath.Dir(workDir), "sessions")
 	_ = os.MkdirAll(jsonlDir, 0o755)
 	jsonlFile := filepath.Join(jsonlDir, fmt.Sprintf("session-%d.jsonl", time.Now().UnixNano()))
 
