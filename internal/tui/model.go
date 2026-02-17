@@ -41,7 +41,7 @@ var (
 		"ready":        lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
 		"approved":     lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
 		"merged":       lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
-		"pr closed":   lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
+		"pr closed":    lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
 		"rejected":     lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
 		"failed":       lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
 	}
@@ -73,8 +73,9 @@ type Model struct {
 	cfg   *config.Config
 
 	// Level 1: job list
-	jobs   []db.Job
-	cursor int
+	jobs         []db.Job
+	issueSummary db.IssueSyncSummary
+	cursor       int
 
 	// Level 2: job detail + session list
 	selected     *db.Job
@@ -93,7 +94,7 @@ type Model struct {
 
 	// Level 3: session detail with scrollable output
 	selectedSession *db.LLMSession
-	showInput       bool     // tab toggles input/output
+	showInput       bool // tab toggles input/output
 	scrollOffset    int
 	lines           []string // pre-split content lines
 
@@ -109,6 +110,7 @@ func NewModel(store *db.Store, cfg *config.Config) Model {
 // ── Messages ────────────────────────────────────────────────────────────────
 
 type jobsMsg []db.Job
+type issueSummaryMsg db.IssueSyncSummary
 type sessionsMsg struct {
 	jobID        string
 	sessions     []db.LLMSessionSummary
@@ -131,7 +133,9 @@ type errMsg error
 
 // ── Init / Commands ─────────────────────────────────────────────────────────
 
-func (m Model) Init() tea.Cmd { return m.fetchJobs }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(m.fetchJobs, m.fetchIssueSummary)
+}
 
 func (m Model) fetchJobs() tea.Msg {
 	jobs, err := m.store.ListJobs(context.Background(), "", "all")
@@ -139,6 +143,14 @@ func (m Model) fetchJobs() tea.Msg {
 		return errMsg(err)
 	}
 	return jobsMsg(jobs)
+}
+
+func (m Model) fetchIssueSummary() tea.Msg {
+	summary, err := m.store.GetIssueSyncSummary(context.Background(), "")
+	if err != nil {
+		return errMsg(err)
+	}
+	return issueSummaryMsg(summary)
 }
 
 func (m Model) fetchSessions() tea.Msg {
@@ -334,6 +346,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobsMsg:
 		m.jobs = msg
 		m.err = nil
+	case issueSummaryMsg:
+		m.issueSummary = db.IssueSyncSummary(msg)
+		m.err = nil
 	case sessionsMsg:
 		// Discard stale response if user navigated away.
 		if m.selected == nil || m.selected.ID != msg.jobID {
@@ -371,7 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessions = nil
 			m.testArtifact = nil
 			m.sessCursor = 0
-			return m, m.fetchJobs
+			return m, tea.Batch(m.fetchJobs, m.fetchIssueSummary)
 		}
 	case errMsg:
 		m.err = msg
@@ -469,7 +484,7 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 			return m, m.fetchSessions
 		}
 	case "r":
-		return m, m.fetchJobs
+		return m, tea.Batch(m.fetchJobs, m.fetchIssueSummary)
 	}
 	return m, nil
 }
@@ -569,7 +584,7 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		m.confirmAction = ""
 		m.actionErr = nil
 	case "r":
-		return m, m.fetchSessions
+		return m, tea.Batch(m.fetchJobs, m.fetchSessions, m.fetchIssueSummary)
 	}
 	return m, nil
 }
@@ -793,6 +808,8 @@ func (m Model) listView() string {
 		stateStyle["failed"].Render("failed"), counts["failed"],
 		labelStyle.Render("done"), counts["approved"]+counts["rejected"],
 	))
+	b.WriteString(fmt.Sprintf("  Issues: %d synced, %d eligible, %d skipped\n",
+		m.issueSummary.Synced, m.issueSummary.Eligible, m.issueSummary.Skipped))
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", w)))
 	b.WriteString("\n")

@@ -51,6 +51,7 @@ ap start -f                # foreground (for debugging)
 ```bash
 ap tui                     # interactive dashboard
 ap list                    # list all jobs
+ap issues                  # list synced issues + eligibility
 ap logs <job-id>           # view LLM output for a job
 ap approve <job-id>        # approve and create PR
 ```
@@ -187,6 +188,7 @@ log_file = "/custom/path/autopr.log"
 | `ap stop` | Gracefully stop the daemon |
 | `ap status` | Show daemon status and job counts |
 | `ap list [--project X] [--state Y]` | List jobs with optional filters |
+| `ap issues [--project X] [--eligible|--ineligible]` | List synced issues and eligibility |
 | `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
 | `ap approve <job-id>` | Approve a job and create PR |
 | `ap reject <job-id> [-r reason]` | Reject a job |
@@ -215,8 +217,9 @@ For automation, use `ap list --json` which returns full job IDs.
 `ap tui` launches an interactive terminal UI with keyboard navigation.
 
 **Level 1 — Job List:** Dashboard header showing daemon status, sync interval,
-worker count, and job state counters. Job table shows short job ID, state, project,
-issue source (e.g. GitHub #1), iteration progress, and truncated issue title.
+worker count, job state counters, and synced issue summary (`Issues: X synced, Y eligible, Z skipped`).
+Job table shows short job ID, state, project, issue source (e.g. GitHub #1), iteration progress,
+and truncated issue title.
 
 **Level 2 — Job Detail:** Full job metadata plus a pipeline session table showing each step
 (plan, implement, code_review) with status, token usage, and duration. Press `d` to view the
