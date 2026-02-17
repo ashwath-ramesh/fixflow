@@ -16,7 +16,17 @@ func EnsureClone(ctx context.Context, repoURL, localPath, token string) error {
 	}
 	authURL := injectToken(repoURL, token)
 	slog.Info("cloning repository", "url", repoURL, "path", localPath)
-	return runGit(ctx, "", "clone", "--bare", authURL, localPath)
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return fmt.Errorf("create repo dir: %w", err)
+	}
+	// Init as bare repo with origin configured so origin/* refs work with worktrees.
+	if err := runGit(ctx, localPath, "init", "--bare"); err != nil {
+		return err
+	}
+	if err := runGit(ctx, localPath, "remote", "add", "origin", authURL); err != nil {
+		return err
+	}
+	return Fetch(ctx, localPath)
 }
 
 // Fetch fetches all refs in the bare repo.
