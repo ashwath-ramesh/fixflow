@@ -29,6 +29,12 @@ type Issue struct {
 	SyncedAt       string
 }
 
+type IssueSyncSummary struct {
+	Synced   int
+	Eligible int
+	Skipped  int
+}
+
 type IssueUpsert struct {
 	ProjectName   string
 	Source        string
@@ -125,6 +131,67 @@ FROM issues WHERE autopr_issue_id = ?`
 	}
 	it.Eligible = eligible == 1
 	return it, nil
+}
+
+func (s *Store) ListIssues(ctx context.Context, project string, eligible *bool) ([]Issue, error) {
+	q := `
+SELECT autopr_issue_id, project_name, source, source_issue_id, title, body, url, state,
+       labels_json, source_meta_json, eligible, skip_reason, evaluated_at, source_updated_at, synced_at
+FROM issues
+WHERE 1=1`
+	var args []any
+	if project != "" {
+		q += ` AND project_name = ?`
+		args = append(args, project)
+	}
+	if eligible != nil {
+		q += ` AND eligible = ?`
+		args = append(args, boolToInt(*eligible))
+	}
+	q += ` ORDER BY synced_at DESC`
+
+	rows, err := s.Reader.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Issue
+	for rows.Next() {
+		var it Issue
+		var eligibleInt int
+		if err := rows.Scan(
+			&it.AutoPRIssueID, &it.ProjectName, &it.Source, &it.SourceIssueID,
+			&it.Title, &it.Body, &it.URL, &it.State,
+			&it.LabelsJSON, &it.SourceMetaJSON, &eligibleInt, &it.SkipReason, &it.EvaluatedAt, &it.SourceUpdated, &it.SyncedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan issue: %w", err)
+		}
+		it.Eligible = eligibleInt == 1
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetIssueSyncSummary(ctx context.Context, project string) (IssueSyncSummary, error) {
+	q := `
+SELECT
+  COUNT(*),
+  COALESCE(SUM(CASE WHEN eligible = 1 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN eligible = 0 THEN 1 ELSE 0 END), 0)
+FROM issues
+WHERE 1=1`
+	var args []any
+	if project != "" {
+		q += ` AND project_name = ?`
+		args = append(args, project)
+	}
+
+	var out IssueSyncSummary
+	if err := s.Reader.QueryRowContext(ctx, q, args...).Scan(&out.Synced, &out.Eligible, &out.Skipped); err != nil {
+		return IssueSyncSummary{}, fmt.Errorf("get issue sync summary: %w", err)
+	}
+	return out, nil
 }
 
 // Cursor operations.

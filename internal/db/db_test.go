@@ -418,3 +418,207 @@ func TestResetJobForRetryBlockedWhenIssueIneligible(t *testing.T) {
 		t.Fatalf("expected failed state after blocked retry, got %q", job.State)
 	}
 }
+
+func TestListIssuesFilters(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ineligible := false
+	id1, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-a",
+		Source:        "github",
+		SourceIssueID: "1",
+		Title:         "eligible-a",
+		URL:           "https://github.com/org/repo/issues/1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue 1: %v", err)
+	}
+	id2, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-a",
+		Source:        "github",
+		SourceIssueID: "2",
+		Title:         "ineligible-a",
+		URL:           "https://github.com/org/repo/issues/2",
+		State:         "open",
+		Eligible:      &ineligible,
+		SkipReason:    "missing required labels: autopr",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue 2: %v", err)
+	}
+	id3, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-b",
+		Source:        "gitlab",
+		SourceIssueID: "3",
+		Title:         "eligible-b",
+		URL:           "https://gitlab.com/org/repo/-/issues/3",
+		State:         "closed",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue 3: %v", err)
+	}
+
+	_, err = store.Writer.ExecContext(ctx, `UPDATE issues SET synced_at = ? WHERE autopr_issue_id = ?`, "2026-02-18T00:00:01Z", id1)
+	if err != nil {
+		t.Fatalf("set synced_at issue 1: %v", err)
+	}
+	_, err = store.Writer.ExecContext(ctx, `UPDATE issues SET synced_at = ? WHERE autopr_issue_id = ?`, "2026-02-18T00:00:02Z", id2)
+	if err != nil {
+		t.Fatalf("set synced_at issue 2: %v", err)
+	}
+	_, err = store.Writer.ExecContext(ctx, `UPDATE issues SET synced_at = ? WHERE autopr_issue_id = ?`, "2026-02-18T00:00:03Z", id3)
+	if err != nil {
+		t.Fatalf("set synced_at issue 3: %v", err)
+	}
+
+	all, err := store.ListIssues(ctx, "", nil)
+	if err != nil {
+		t.Fatalf("list all issues: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(all))
+	}
+	if all[0].SourceIssueID != "3" || all[1].SourceIssueID != "2" || all[2].SourceIssueID != "1" {
+		t.Fatalf("expected synced_at desc order, got [%s, %s, %s]", all[0].SourceIssueID, all[1].SourceIssueID, all[2].SourceIssueID)
+	}
+
+	projectOnly, err := store.ListIssues(ctx, "project-a", nil)
+	if err != nil {
+		t.Fatalf("list project issues: %v", err)
+	}
+	if len(projectOnly) != 2 {
+		t.Fatalf("expected 2 project-a issues, got %d", len(projectOnly))
+	}
+	for _, it := range projectOnly {
+		if it.ProjectName != "project-a" {
+			t.Fatalf("expected project-a issue, got %q", it.ProjectName)
+		}
+	}
+
+	eligible := true
+	eligibleOnly, err := store.ListIssues(ctx, "", &eligible)
+	if err != nil {
+		t.Fatalf("list eligible issues: %v", err)
+	}
+	if len(eligibleOnly) != 2 {
+		t.Fatalf("expected 2 eligible issues, got %d", len(eligibleOnly))
+	}
+	for _, it := range eligibleOnly {
+		if !it.Eligible {
+			t.Fatalf("expected all eligible issues")
+		}
+	}
+
+	ineligibleOnly, err := store.ListIssues(ctx, "", &ineligible)
+	if err != nil {
+		t.Fatalf("list ineligible issues: %v", err)
+	}
+	if len(ineligibleOnly) != 1 {
+		t.Fatalf("expected 1 ineligible issue, got %d", len(ineligibleOnly))
+	}
+	if ineligibleOnly[0].Eligible {
+		t.Fatalf("expected ineligible issue")
+	}
+	if ineligibleOnly[0].SkipReason != "missing required labels: autopr" {
+		t.Fatalf("unexpected skip reason: %q", ineligibleOnly[0].SkipReason)
+	}
+}
+
+func TestGetIssueSyncSummary(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ineligible := false
+	if _, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-a",
+		Source:        "github",
+		SourceIssueID: "1",
+		Title:         "eligible-a",
+		URL:           "https://github.com/org/repo/issues/1",
+		State:         "open",
+	}); err != nil {
+		t.Fatalf("upsert issue 1: %v", err)
+	}
+	if _, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-a",
+		Source:        "github",
+		SourceIssueID: "2",
+		Title:         "ineligible-a",
+		URL:           "https://github.com/org/repo/issues/2",
+		State:         "open",
+		Eligible:      &ineligible,
+		SkipReason:    "missing required labels: autopr",
+	}); err != nil {
+		t.Fatalf("upsert issue 2: %v", err)
+	}
+	if _, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "project-b",
+		Source:        "gitlab",
+		SourceIssueID: "3",
+		Title:         "eligible-b",
+		URL:           "https://gitlab.com/org/repo/-/issues/3",
+		State:         "closed",
+	}); err != nil {
+		t.Fatalf("upsert issue 3: %v", err)
+	}
+
+	summary, err := store.GetIssueSyncSummary(ctx, "")
+	if err != nil {
+		t.Fatalf("summary all: %v", err)
+	}
+	if summary.Synced != 3 || summary.Eligible != 2 || summary.Skipped != 1 {
+		t.Fatalf("unexpected summary all: %+v", summary)
+	}
+
+	projectSummary, err := store.GetIssueSyncSummary(ctx, "project-a")
+	if err != nil {
+		t.Fatalf("summary project-a: %v", err)
+	}
+	if projectSummary.Synced != 2 || projectSummary.Eligible != 1 || projectSummary.Skipped != 1 {
+		t.Fatalf("unexpected summary project-a: %+v", projectSummary)
+	}
+}
+
+func TestGetIssueSyncSummaryNoRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	summary, err := store.GetIssueSyncSummary(ctx, "")
+	if err != nil {
+		t.Fatalf("summary no rows: %v", err)
+	}
+	if summary.Synced != 0 || summary.Eligible != 0 || summary.Skipped != 0 {
+		t.Fatalf("unexpected empty summary: %+v", summary)
+	}
+
+	projectSummary, err := store.GetIssueSyncSummary(ctx, "missing-project")
+	if err != nil {
+		t.Fatalf("summary missing project: %v", err)
+	}
+	if projectSummary.Synced != 0 || projectSummary.Eligible != 0 || projectSummary.Skipped != 0 {
+		t.Fatalf("unexpected missing-project summary: %+v", projectSummary)
+	}
+}
