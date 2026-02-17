@@ -151,9 +151,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
 	cfg.BaseDir = filepath.Dir(path)
+	// Snapshot tokens from config file before credentials/env are merged in.
+	fileTokens := cfg.Tokens
 	applyDefaults(cfg)
 	applyCredentialsAndEnv(cfg)
-	warnTokensInFile(cfg)
+	warnTokensInFile(fileTokens)
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
@@ -270,15 +272,18 @@ func applyCredentialsAndEnv(cfg *Config) {
 	}
 }
 
-func warnTokensInFile(cfg *Config) {
-	if cfg.Tokens.GitLab != "" && os.Getenv("GITLAB_TOKEN") == "" {
-		slog.Warn("gitlab token found in config file; prefer GITLAB_TOKEN env var")
+// warnTokensInFile warns only when a token was literally written in config.toml.
+// It receives the token values as they were before credentials.toml and env vars
+// were merged, so tokens from credentials.toml don't trigger a false positive.
+func warnTokensInFile(fileTokens TokensConfig) {
+	if fileTokens.GitLab != "" {
+		slog.Warn("gitlab token found in config file; prefer credentials.toml or GITLAB_TOKEN env var")
 	}
-	if cfg.Tokens.GitHub != "" && os.Getenv("GITHUB_TOKEN") == "" {
-		slog.Warn("github token found in config file; prefer GITHUB_TOKEN env var")
+	if fileTokens.GitHub != "" {
+		slog.Warn("github token found in config file; prefer credentials.toml or GITHUB_TOKEN env var")
 	}
-	if cfg.Tokens.Sentry != "" && os.Getenv("SENTRY_TOKEN") == "" {
-		slog.Warn("sentry token found in config file; prefer SENTRY_TOKEN env var")
+	if fileTokens.Sentry != "" {
+		slog.Warn("sentry token found in config file; prefer credentials.toml or SENTRY_TOKEN env var")
 	}
 }
 

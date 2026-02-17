@@ -127,7 +127,8 @@ func runGlobalInit() error {
 	fmt.Printf("Database initialized: %s\n", cfg.DBPath)
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  1. Edit your config to add projects: ap config\n")
-	fmt.Printf("  2. Start the TUI:                    ap tui\n")
+	fmt.Printf("  2. Start the daemon:                 ap start\n")
+	fmt.Printf("  3. Start the TUI:                    ap tui\n")
 	return nil
 }
 
