@@ -47,18 +47,12 @@ func (r *Runner) Run(ctx context.Context, jobID string) error {
 	// Determine token for git operations.
 	token := r.tokenForProject(projectCfg)
 
-	// Ensure bare clone exists.
-	repoPath := r.cfg.LocalRepoPath(job.ProjectName)
-	if err := git.EnsureClone(ctx, projectCfg.RepoURL, repoPath, token); err != nil {
-		return r.failJob(ctx, jobID, job.State, "clone failed: "+err.Error())
-	}
-
-	// Create a regular clone for the job (not a worktree — LLM tools destroy worktree .git links).
+	// Clone repo directly for this job (regular clone, not a worktree).
 	branchName := fmt.Sprintf("fixflow/%s", jobID)
 	worktreePath := filepath.Join(r.cfg.ReposRoot, "worktrees", jobID)
 
 	if job.WorktreePath == "" {
-		if err := git.CloneForJob(ctx, repoPath, worktreePath, branchName, projectCfg.BaseBranch); err != nil {
+		if err := git.CloneForJob(ctx, projectCfg.RepoURL, token, worktreePath, branchName, projectCfg.BaseBranch); err != nil {
 			return r.failJob(ctx, jobID, job.State, "clone for job: "+err.Error())
 		}
 		_ = r.store.UpdateJobField(ctx, jobID, "worktree_path", worktreePath)
@@ -67,11 +61,6 @@ func (r *Runner) Run(ctx context.Context, jobID string) error {
 		worktreePath = job.WorktreePath
 		branchName = job.BranchName
 	}
-
-	// Cleanup job directory on exit.
-	defer func() {
-		git.RemoveJobDir(worktreePath)
-	}()
 
 	// Run pipeline steps based on current state.
 	return r.runSteps(ctx, jobID, job.State, issue, projectCfg, worktreePath)

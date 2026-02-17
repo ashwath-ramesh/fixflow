@@ -43,22 +43,21 @@ func LatestCommit(ctx context.Context, dir string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// CommitAll stages all tracked changes and commits with the given message.
-// Uses scoped add (not -A) to avoid accidental inclusion of untracked files.
+// CommitAll stages all changes (including new files) and commits with the given message.
 func CommitAll(ctx context.Context, dir, message string) (string, error) {
-	// Stage modified and deleted tracked files.
-	if err := runGit(ctx, dir, "add", "-u"); err != nil {
+	// Stage everything — LLM tools create new files that need to be included.
+	if err := runGit(ctx, dir, "add", "-A"); err != nil {
 		return "", fmt.Errorf("git add: %w", err)
 	}
 
 	// Check if there's anything to commit.
-	out, err := runGitOutput(ctx, dir, "status", "--porcelain")
-	if err != nil {
-		return "", fmt.Errorf("git status: %w", err)
-	}
-	if strings.TrimSpace(out) == "" {
+	out, err := runGitOutput(ctx, dir, "diff", "--cached", "--quiet")
+	if err == nil {
+		// No diff means nothing staged.
 		return "", fmt.Errorf("nothing to commit")
 	}
+	// err != nil means there are staged changes (diff --cached returns exit 1).
+	_ = out
 
 	if err := runGit(ctx, dir, "commit", "-m", message); err != nil {
 		return "", fmt.Errorf("git commit: %w", err)
