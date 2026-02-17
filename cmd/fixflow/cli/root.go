@@ -56,6 +56,11 @@ func openStore(cfg *config.Config) (*db.Store, error) {
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
+	// Clean up orphaned WAL sidecar files if the main DB was deleted.
+	if _, err := os.Stat(cfg.DBPath); os.IsNotExist(err) {
+		_ = os.Remove(cfg.DBPath + "-shm")
+		_ = os.Remove(cfg.DBPath + "-wal")
+	}
 	return db.Open(cfg.DBPath)
 }
 
