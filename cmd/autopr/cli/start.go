@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"autopr/internal/daemon"
 
@@ -33,6 +34,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	level := cfg.SlogLevel()
 	opts := &slog.HandlerOptions{Level: level}
 	if cfg.LogFile != "" {
+		if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err != nil {
+			return fmt.Errorf("create log dir: %w", err)
+		}
 		f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return fmt.Errorf("open log file: %w", err)

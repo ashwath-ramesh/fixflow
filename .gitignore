@@ -12,6 +12,7 @@ autopr.toml
 
 # Build output
 ap
+dist/
 
 # Runtime
 .repos/

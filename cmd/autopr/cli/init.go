@@ -162,11 +162,12 @@ const configTemplate = `# AutoPR configuration
 #
 # Tokens: store in ~/.config/autopr/credentials.toml or set env vars
 # (GITHUB_TOKEN, GITLAB_TOKEN, SENTRY_TOKEN, AUTOPR_WEBHOOK_SECRET)
+#
+# Data files (DB, repos) default to ~/.local/share/autopr/
+# State files (logs, PID) default to ~/.local/state/autopr/
+# Override with XDG_DATA_HOME / XDG_STATE_HOME or set paths explicitly below.
 
-db_path = "autopr.db"
-repos_root = ".repos"
 log_level = "info"              # debug|info|warn|error
-log_file = "autopr.log"         # relative to config dir
 
 [daemon]
 webhook_port = 9847
@@ -174,7 +175,6 @@ webhook_secret = ""             # override via AUTOPR_WEBHOOK_SECRET env var
 max_workers = 3
 max_iterations = 3              # implement<->review loop default
 sync_interval = "5m"            # GitHub/Sentry poll interval
-pid_file = "autopr.pid"
 auto_pr = false                 # set true to auto-create PRs after tests pass
 
 # [sentry]
@@ -198,11 +198,11 @@ base_branch = "main"
   # org = "my-org"
   # project = "my-project"
 
+  # Override default LLM prompts with custom markdown files:
   # [projects.prompts]
-  # plan = "templates/prompts/plan.md"
-  # plan_review = "templates/prompts/plan_review.md"
-  # implement = "templates/prompts/implement.md"
-  # code_review = "templates/prompts/code_review.md"
+  # plan = "/path/to/plan.md"
+  # implement = "/path/to/implement.md"
+  # code_review = "/path/to/code_review.md"
 
 # --- GitLab example ---
 # [[projects]]

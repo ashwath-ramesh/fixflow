@@ -177,13 +177,25 @@ func LoadMinimal(path string) (*Config, error) {
 
 func applyDefaults(cfg *Config) {
 	if cfg.DBPath == "" {
-		cfg.DBPath = "autopr.db"
+		if d, err := DataDir(); err == nil {
+			cfg.DBPath = filepath.Join(d, "autopr.db")
+		} else {
+			cfg.DBPath = "autopr.db"
+		}
 	}
 	if cfg.ReposRoot == "" {
-		cfg.ReposRoot = ".repos"
+		if d, err := DataDir(); err == nil {
+			cfg.ReposRoot = filepath.Join(d, "repos")
+		} else {
+			cfg.ReposRoot = ".repos"
+		}
 	}
 	if cfg.LogFile == "" {
-		cfg.LogFile = "autopr.log"
+		if d, err := StateDir(); err == nil {
+			cfg.LogFile = filepath.Join(d, "autopr.log")
+		} else {
+			cfg.LogFile = "autopr.log"
+		}
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
@@ -201,7 +213,11 @@ func applyDefaults(cfg *Config) {
 		cfg.Daemon.SyncInterval = "5m"
 	}
 	if cfg.Daemon.PIDFile == "" {
-		cfg.Daemon.PIDFile = "autopr.pid"
+		if d, err := StateDir(); err == nil {
+			cfg.Daemon.PIDFile = filepath.Join(d, "autopr.pid")
+		} else {
+			cfg.Daemon.PIDFile = "autopr.pid"
+		}
 	}
 	if cfg.Sentry.BaseURL == "" {
 		cfg.Sentry.BaseURL = "https://sentry.io"

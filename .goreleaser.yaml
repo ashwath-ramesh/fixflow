@@ -1,0 +1,34 @@
+version: 2
+
+builds:
+  - main: ./cmd/autopr
+    binary: ap
+    ldflags:
+      - -s -w
+      - -X autopr/cmd/autopr/cli.version={{.Version}}
+      - -X autopr/cmd/autopr/cli.commit={{.ShortCommit}}
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: "ap_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+release:
+  github:
+    owner: ashwath-ramesh
+    name: autopr

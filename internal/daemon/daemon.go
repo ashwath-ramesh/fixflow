@@ -25,6 +25,9 @@ import (
 // Blocks until SIGINT/SIGTERM is received.
 func Run(cfg *config.Config, foreground bool) error {
 	// Write PID file.
+	if err := os.MkdirAll(filepath.Dir(cfg.Daemon.PIDFile), 0o755); err != nil {
+		return fmt.Errorf("create pid dir: %w", err)
+	}
 	if err := WritePID(cfg.Daemon.PIDFile); err != nil {
 		return err
 	}

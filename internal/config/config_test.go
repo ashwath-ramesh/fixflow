@@ -109,6 +109,150 @@ func TestLoadFailsForNoProjects(t *testing.T) {
 	}
 }
 
+func TestDefaultPathsAreAbsoluteXDG(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	// Config with no path fields set — defaults should kick in.
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	// All default paths must be absolute.
+	if !filepath.IsAbs(cfg.DBPath) {
+		t.Fatalf("expected absolute DBPath, got %q", cfg.DBPath)
+	}
+	if !filepath.IsAbs(cfg.ReposRoot) {
+		t.Fatalf("expected absolute ReposRoot, got %q", cfg.ReposRoot)
+	}
+	if !filepath.IsAbs(cfg.LogFile) {
+		t.Fatalf("expected absolute LogFile, got %q", cfg.LogFile)
+	}
+	if !filepath.IsAbs(cfg.Daemon.PIDFile) {
+		t.Fatalf("expected absolute PIDFile, got %q", cfg.Daemon.PIDFile)
+	}
+
+	// DBPath and ReposRoot should be under the data directory.
+	if !strings.Contains(cfg.DBPath, filepath.Join(".local", "share", "autopr")) {
+		t.Fatalf("expected DBPath under XDG data dir, got %q", cfg.DBPath)
+	}
+	if !strings.Contains(cfg.ReposRoot, filepath.Join(".local", "share", "autopr")) {
+		t.Fatalf("expected ReposRoot under XDG data dir, got %q", cfg.ReposRoot)
+	}
+
+	// LogFile and PIDFile should be under the state directory.
+	if !strings.Contains(cfg.LogFile, filepath.Join(".local", "state", "autopr")) {
+		t.Fatalf("expected LogFile under XDG state dir, got %q", cfg.LogFile)
+	}
+	if !strings.Contains(cfg.Daemon.PIDFile, filepath.Join(".local", "state", "autopr")) {
+		t.Fatalf("expected PIDFile under XDG state dir, got %q", cfg.Daemon.PIDFile)
+	}
+}
+
+func TestExplicitRelativePathsResolveToConfigDir(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+db_path = "my.db"
+repos_root = ".repos"
+log_file = "my.log"
+
+[daemon]
+pid_file = "my.pid"
+
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	// Explicit relative paths should resolve relative to config dir (tmp).
+	if cfg.DBPath != filepath.Join(tmp, "my.db") {
+		t.Fatalf("expected DBPath %q, got %q", filepath.Join(tmp, "my.db"), cfg.DBPath)
+	}
+	if cfg.ReposRoot != filepath.Join(tmp, ".repos") {
+		t.Fatalf("expected ReposRoot %q, got %q", filepath.Join(tmp, ".repos"), cfg.ReposRoot)
+	}
+	if cfg.LogFile != filepath.Join(tmp, "my.log") {
+		t.Fatalf("expected LogFile %q, got %q", filepath.Join(tmp, "my.log"), cfg.LogFile)
+	}
+	if cfg.Daemon.PIDFile != filepath.Join(tmp, "my.pid") {
+		t.Fatalf("expected PIDFile %q, got %q", filepath.Join(tmp, "my.pid"), cfg.Daemon.PIDFile)
+	}
+}
+
+func TestXDGEnvOverridesDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	customData := filepath.Join(tmp, "custom-data")
+	customState := filepath.Join(tmp, "custom-state")
+	t.Setenv("XDG_DATA_HOME", customData)
+	t.Setenv("XDG_STATE_HOME", customState)
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.DBPath != filepath.Join(customData, "autopr", "autopr.db") {
+		t.Fatalf("expected DBPath under custom XDG_DATA_HOME, got %q", cfg.DBPath)
+	}
+	if cfg.ReposRoot != filepath.Join(customData, "autopr", "repos") {
+		t.Fatalf("expected ReposRoot under custom XDG_DATA_HOME, got %q", cfg.ReposRoot)
+	}
+	if cfg.LogFile != filepath.Join(customState, "autopr", "autopr.log") {
+		t.Fatalf("expected LogFile under custom XDG_STATE_HOME, got %q", cfg.LogFile)
+	}
+	if cfg.Daemon.PIDFile != filepath.Join(customState, "autopr", "autopr.pid") {
+		t.Fatalf("expected PIDFile under custom XDG_STATE_HOME, got %q", cfg.Daemon.PIDFile)
+	}
+}
+
 func TestLoadFailsForInvalidProvider(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

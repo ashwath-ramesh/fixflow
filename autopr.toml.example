@@ -1,28 +1,30 @@
 # AutoPR Configuration
-# Copy to autopr.toml and customize.
+# Run `ap init` for interactive setup, or copy this file and customize.
+#
+# Tokens: store in ~/.config/autopr/credentials.toml or set env vars
+# (GITHUB_TOKEN, GITLAB_TOKEN, SENTRY_TOKEN, AUTOPR_WEBHOOK_SECRET)
+#
+# Data files (DB, repos) default to ~/.local/share/autopr/
+# State files (logs, PID) default to ~/.local/state/autopr/
+# Override with XDG_DATA_HOME / XDG_STATE_HOME or set paths explicitly below.
+# Run `ap paths` to see resolved locations.
 
-db_path = "autopr.db"
-repos_root = ".repos"
-log_level = "info"         # debug, info, warn, error
-# log_file = "autopr.log" # Uncomment to log to file instead of stderr
+# db_path = "/custom/path/autopr.db"     # default: ~/.local/share/autopr/autopr.db
+# repos_root = "/custom/path/repos"      # default: ~/.local/share/autopr/repos
+# log_file = "/custom/path/autopr.log"   # default: ~/.local/state/autopr/autopr.log
+log_level = "info"                        # debug, info, warn, error
 
 [daemon]
-webhook_port = 8080
+webhook_port = 9847
 # webhook_secret = ""      # Set via AUTOPR_WEBHOOK_SECRET env var
 max_workers = 3
 max_iterations = 3
 sync_interval = "5m"
-pid_file = "autopr.pid"
+# pid_file = "/custom/path/autopr.pid"   # default: ~/.local/state/autopr/autopr.pid
 # auto_pr = false               # Set true to auto-create PRs after tests pass
 
-[tokens]
-# Prefer environment variables: GITLAB_TOKEN, GITHUB_TOKEN, SENTRY_TOKEN
-# gitlab = ""
-# github = ""
-# sentry = ""
-
-[sentry]
-base_url = "https://sentry.io"
+# [sentry]
+# base_url = "https://sentry.io"  # uncomment for self-hosted Sentry
 
 [llm]
 provider = "claude"  # claude or codex
@@ -46,8 +48,8 @@ base_branch = "main"
   # org = "myorg"
   # project = "my-project"
 
+  # Override default LLM prompts with custom markdown files:
   # [projects.prompts]
-  # plan = "prompts/plan.md"
-  # plan_review = "prompts/plan_review.md"
-  # implement = "prompts/implement.md"
-  # code_review = "prompts/code_review.md"
+  # plan = "/path/to/plan.md"
+  # implement = "/path/to/implement.md"
+  # code_review = "/path/to/code_review.md"

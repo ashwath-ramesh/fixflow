@@ -36,3 +36,31 @@ func CredentialsPath() (string, error) {
 	}
 	return filepath.Join(dir, "credentials.toml"), nil
 }
+
+// DataDir returns the autopr data directory, respecting XDG_DATA_HOME.
+// Defaults to ~/.local/share/autopr/.
+func DataDir() (string, error) {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "autopr"), nil
+}
+
+// StateDir returns the autopr state directory, respecting XDG_STATE_HOME.
+// Defaults to ~/.local/state/autopr/.
+func StateDir() (string, error) {
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(base, "autopr"), nil
+}

@@ -1,80 +1,80 @@
 # AutoPR
 
-Autonomous issue-to-PR daemon. AutoPR watches your GitLab, GitHub, and Sentry issues,
+Autonomous issue-to-PR daemon. AutoPR watches your GitHub, GitLab, and Sentry issues,
 then uses an LLM (Claude or Codex CLI) to plan, implement, test, and push fixes — ready
 for human approval.
 
-## How It Works
+## Install
 
-```mermaid
-flowchart TD
-    subgraph Sources
-        GL[GitLab webhook]
-        GH[GitHub poll]
-        SE[Sentry poll]
-    end
-
-    GL & GH & SE --> D[ap daemon]
-    D --> DB[(SQLite)]
-    D --> LLM[LLM CLI<br/>claude --print / codex --full-auto]
-    D --> Git[Git<br/>clone, branch, push]
-```
-
-**Pipeline per issue:**
-
-```mermaid
-flowchart LR
-    Plan --> Implement --> Review
-    Review -->|changes requested| Implement
-    Review -->|approved| Test
-    Test -->|failed| Implement
-    Test -->|pass + push| Ready
-    Ready -->|ap approve| Approved
-    Ready -->|auto_pr = true| Approved
-    Ready -->|ap reject| Rejected
-```
-
-1. **Plan** — LLM analyzes the issue and produces an implementation plan.
-2. **Implement** — LLM writes code in a git worktree following the plan. A safety-net commit captures any uncommitted changes.
-3. **Code Review** — LLM reviews its own changes. If not approved, loops back to implement (up to `max_iterations`).
-4. **Test** — Runs the project's test command. On failure, loops back to implement with the test output so the LLM can fix it (up to `max_iterations`). On pass, pushes the branch.
-5. **Ready** — Waits for human `approve` / `reject` via CLI or TUI. With `auto_pr = true`, a PR is created automatically and the job moves straight to `approved`.
-
-## Prerequisites
-
-### Build
-
-- Go 1.23+
-- Git
-- SQLite (via `modernc.org/sqlite`, no CGO required)
-
-### LLM CLI Tool (pick one)
-
-AutoPR does not call LLM APIs directly. It shells out to a CLI tool in
-non-interactive mode (`claude --print` / `codex exec --full-auto`) and parses
-the streaming JSON output. You need the CLI installed and authenticated.
-
-**OpenAI Codex CLI:**
+**macOS:**
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/ashwath-ramesh/autopr/master/scripts/install.sh | bash
+```
+
+**From source (any platform with Go 1.23+):**
+
+```bash
+go build -o ap ./cmd/autopr && mv ap /usr/local/bin/
+```
+
+## Quick Start
+
+### 1. Install an LLM CLI
+
+AutoPR shells out to an LLM CLI tool. Pick one and install it:
+
+```bash
+# Option A: OpenAI Codex CLI (needs OPENAI_API_KEY)
 npm install -g @openai/codex
-```
 
-The Codex CLI must be able to authenticate — set `OPENAI_API_KEY` in your
-environment, or log in via the CLI. An OpenAI Plus/Pro subscription or API
-credits is needed.
-
-**Anthropic Claude Code CLI:**
-
-```bash
+# Option B: Anthropic Claude Code CLI (needs ANTHROPIC_API_KEY)
 npm install -g @anthropic-ai/claude-code
 ```
 
-The Claude Code CLI must be able to authenticate — set `ANTHROPIC_API_KEY` in
-your environment, or log in via the CLI. A Claude Max subscription or API
-credits is needed.
+### 2. Set up AutoPR
 
-Configure which CLI to use in `autopr.toml`:
+```bash
+ap init                    # creates ~/.config/autopr/ with config + credentials
+ap config                  # opens config in $EDITOR — add your projects
+```
+
+### 3. Start the daemon
+
+```bash
+ap start                   # background daemon
+ap start -f                # foreground (for debugging)
+```
+
+### 4. Watch it work
+
+```bash
+ap tui                     # interactive dashboard
+ap list                    # list all jobs
+ap logs <job-id>           # view LLM output for a job
+ap approve <job-id>        # approve and create PR
+```
+
+### What happens
+
+1. AutoPR polls GitHub/Sentry (or receives GitLab webhooks) for new issues
+2. For each issue: **Plan** → **Implement** → **Code Review** → **Test** → **Ready**
+3. You review the result with `ap tui` or `ap logs`, then `ap approve` or `ap reject`
+4. On approve, a PR is created. Set `auto_pr = true` to skip manual approval.
+
+## Prerequisites
+
+### LLM CLI Tool
+
+AutoPR does not call LLM APIs directly. It shells out to a CLI in
+non-interactive mode and parses the output. You need one installed and authenticated:
+
+| Provider | Install | Auth |
+|----------|---------|------|
+| OpenAI Codex | `npm install -g @openai/codex` | `OPENAI_API_KEY` env var |
+| Anthropic Claude | `npm install -g @anthropic-ai/claude-code` | `ANTHROPIC_API_KEY` env var |
+
+Configure in `config.toml`:
 
 ```toml
 [llm]
@@ -83,84 +83,60 @@ provider = "codex"   # or "claude"
 
 ### Source Tokens
 
-- **GitHub:** Fine-grained PAT with `Contents: Read and write` + `Issues: Read-only`
-- **GitLab:** Project access token with `api` scope
-- **Sentry:** Auth token with `event:read` + `project:read`
+| Source | Token type | Scopes |
+|--------|-----------|--------|
+| GitHub | Fine-grained PAT | `Contents: Read and write`, `Issues: Read-only` |
+| GitLab | Project access token | `api` |
+| Sentry | Auth token | `event:read`, `project:read` |
 
-## Quick Start
-
-```bash
-# Build
-go build -o ap ./cmd/autopr
-
-# Initialize config + database
-./ap init
-
-# Edit the config
-./ap config   # opens autopr.toml in $EDITOR
-
-# Set tokens via env vars (never commit these)
-export GITLAB_TOKEN="glpat-..."
-export GITHUB_TOKEN="ghp_..."
-export SENTRY_TOKEN="sntrys_..."
-export AUTOPR_WEBHOOK_SECRET="your-secret"
-
-# Start the daemon
-./ap start
-
-# Or run in foreground for debugging
-./ap start -f
-```
+Set via `ap init` or env vars (`GITHUB_TOKEN`, `GITLAB_TOKEN`, `SENTRY_TOKEN`).
 
 ## Configuration
 
-AutoPR uses a single `autopr.toml` file. Running `ap init` creates a starter template.
+AutoPR uses `~/.config/autopr/config.toml`. Running `ap init` creates it interactively.
 
 ```toml
-db_path = "autopr.db"
-repos_root = ".repos"
 log_level = "info"         # debug, info, warn, error
-# log_file = "autopr.log" # uncomment to log to file
 
 [daemon]
-webhook_port = 8080
+webhook_port = 9847
 max_workers = 3
 max_iterations = 3         # implement<->review retries
 sync_interval = "5m"       # GitHub/Sentry polling interval
-pid_file = "autopr.pid"
 # auto_pr = false          # set true to auto-create PRs after tests pass
 
-[tokens]
-# Prefer env vars: GITLAB_TOKEN, GITHUB_TOKEN, SENTRY_TOKEN
-
-[sentry]
-base_url = "https://sentry.io"
-
 [llm]
-provider = "claude"        # claude or codex
+provider = "codex"         # codex or claude
 
 [[projects]]
 name = "my-project"
-repo_url = "git@gitlab.com:org/repo.git"
-test_cmd = "make test"
+repo_url = "git@github.com:org/repo.git"
+test_cmd = "go test ./..."
 base_branch = "main"
 
-  [projects.gitlab]
-  base_url = "https://gitlab.com"
-  project_id = "12345"
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+```
 
-  # [projects.github]
-  # owner = "org"
-  # repo = "repo"
+### File Locations
 
-  # [projects.sentry]
-  # org = "my-org"
-  # project = "my-project"
+AutoPR follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/):
 
-  # [projects.prompts]
-  # plan = "prompts/plan.md"
-  # implement = "prompts/implement.md"
-  # code_review = "prompts/code_review.md"
+| Directory | Default | Contents |
+|-----------|---------|----------|
+| Config | `~/.config/autopr/` | `config.toml`, `credentials.toml` |
+| Data | `~/.local/share/autopr/` | `autopr.db`, `repos/` |
+| State | `~/.local/state/autopr/` | `autopr.log`, `autopr.pid` |
+
+Override with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, or `XDG_STATE_HOME`. Run `ap paths` to see resolved locations.
+
+You can also set explicit paths in config:
+
+```toml
+db_path = "/custom/path/autopr.db"
+repos_root = "/custom/path/repos"
+log_file = "/custom/path/autopr.log"
 ```
 
 ### Environment Variable Overrides
@@ -178,20 +154,20 @@ base_branch = "main"
 
 ## Setting Up a Project
 
-### GitLab (webhook-driven)
-
-1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
-2. In GitLab, go to **Settings > Webhooks** and add:
-   - **URL:** `http://<your-host>:8080/webhook`
-   - **Secret token:** same value as `AUTOPR_WEBHOOK_SECRET`
-   - **Trigger:** Issue events
-3. When an issue is opened or reopened, AutoPR creates a job automatically.
-
 ### GitHub (polling)
 
 1. Add `[projects.github]` with `owner` and `repo`.
 2. AutoPR polls for open issues every `sync_interval`.
 3. New issues are picked up and processed automatically.
+
+### GitLab (webhook-driven)
+
+1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
+2. In GitLab, go to **Settings > Webhooks** and add:
+   - **URL:** `http://<your-host>:9847/webhook`
+   - **Secret token:** same value as `AUTOPR_WEBHOOK_SECRET`
+   - **Trigger:** Issue events
+3. When an issue is opened or reopened, AutoPR creates a job automatically.
 
 ### Sentry (polling)
 
@@ -202,17 +178,18 @@ base_branch = "main"
 
 | Command | Description |
 |---------|-------------|
-| `ap init` | Create config template and initialize database |
+| `ap init` | Interactive setup wizard |
 | `ap start [-f]` | Start the daemon (`-f` for foreground) |
 | `ap stop` | Gracefully stop the daemon |
-| `ap status` | Show daemon status and job counts by state |
+| `ap status` | Show daemon status and job counts |
 | `ap list [--project X] [--state Y]` | List jobs with optional filters |
-| `ap logs <job-id>` | Show full session history, artifacts, and tokens |
-| `ap approve <job-id>` | Approve a job in `ready` state |
-| `ap reject <job-id> [-r reason]` | Reject a job in `ready` state |
-| `ap retry <job-id> [-n notes]` | Re-queue a `failed` or `rejected` job |
-| `ap config` | Open `autopr.toml` in `$EDITOR` |
-| `ap tui` | Interactive terminal dashboard (see below) |
+| `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
+| `ap approve <job-id>` | Approve a job and create PR |
+| `ap reject <job-id> [-r reason]` | Reject a job |
+| `ap retry <job-id> [-n notes]` | Re-queue a failed/rejected job |
+| `ap config` | Open config in `$EDITOR` |
+| `ap paths` | Show where files are stored |
+| `ap tui` | Interactive terminal dashboard |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
 
@@ -279,13 +256,13 @@ stateDiagram-v2
 
 ## Custom Prompts
 
-Override default prompts per project in `autopr.toml`:
+Override default LLM prompts per project with custom markdown files:
 
 ```toml
 [projects.prompts]
-plan = "prompts/plan.md"
-implement = "prompts/implement.md"
-code_review = "prompts/code_review.md"
+plan = "/path/to/plan.md"
+implement = "/path/to/implement.md"
+code_review = "/path/to/code_review.md"
 ```
 
 Prompt templates support these placeholders:
@@ -302,7 +279,7 @@ Prompt templates support these placeholders:
 The daemon exposes a health endpoint on the webhook port:
 
 ```bash
-curl http://localhost:8088/health
+curl http://localhost:9847/health
 ```
 
 Returns JSON with `status`, `uptime_seconds`, and `job_queue_depth`.
@@ -332,9 +309,14 @@ go vet ./...
 go test ./...
 ```
 
-## Resetting the Database
+## Resetting
 
 ```bash
-rm -f autopr.db
-./ap init   # re-creates schema
+# Reset database only
+rm -f ~/.local/share/autopr/autopr.db
+ap init
+
+# Full clean slate
+rm -rf ~/.config/autopr ~/.local/share/autopr ~/.local/state/autopr
+ap init
 ```
