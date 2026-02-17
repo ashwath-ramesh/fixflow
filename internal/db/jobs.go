@@ -81,25 +81,25 @@ func DisplayStep(step string) string {
 }
 
 type Job struct {
-	ID              string
-	AutoPRIssueID  string
-	ProjectName     string
-	State           string
-	Iteration       int
-	MaxIterations   int
-	WorktreePath    string
-	BranchName      string
-	CommitSHA       string
-	HumanNotes      string
-	ErrorMessage    string
-	PRURL           string
-	RejectReason    string
-	PRMergedAt      string
-	PRClosedAt      string
-	CreatedAt       string
-	UpdatedAt       string
-	StartedAt       string
-	CompletedAt     string
+	ID            string
+	AutoPRIssueID string
+	ProjectName   string
+	State         string
+	Iteration     int
+	MaxIterations int
+	WorktreePath  string
+	BranchName    string
+	CommitSHA     string
+	HumanNotes    string
+	ErrorMessage  string
+	PRURL         string
+	RejectReason  string
+	PRMergedAt    string
+	PRClosedAt    string
+	CreatedAt     string
+	UpdatedAt     string
+	StartedAt     string
+	CompletedAt   string
 
 	// Joined from issues table (populated by ListJobs).
 	IssueSource   string
@@ -126,7 +126,14 @@ func (s *Store) ClaimJob(ctx context.Context) (string, error) {
 	const q = `
 UPDATE jobs SET state = 'planning', started_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = (SELECT id FROM jobs WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1)
+WHERE id = (
+	SELECT j.id
+	FROM jobs j
+	JOIN issues i ON i.autopr_issue_id = j.autopr_issue_id
+	WHERE j.state = 'queued' AND i.eligible = 1
+	ORDER BY j.created_at ASC
+	LIMIT 1
+)
 RETURNING id`
 	var id string
 	err := s.Writer.QueryRowContext(ctx, q).Scan(&id)
@@ -274,12 +281,30 @@ UPDATE jobs SET state = 'queued', iteration = 0, worktree_path = NULL, branch_na
                commit_sha = NULL, error_message = NULL, human_notes = ?,
                started_at = NULL, completed_at = NULL,
                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = ? AND state IN ('failed', 'rejected')`, notes, jobID)
+WHERE id = ? AND state IN ('failed', 'rejected')
+  AND EXISTS (
+    SELECT 1 FROM issues i
+    WHERE i.autopr_issue_id = jobs.autopr_issue_id AND i.eligible = 1
+  )`, notes, jobID)
 	if err != nil {
 		return fmt.Errorf("reset job %s: %w", jobID, err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		var state string
+		var eligible int
+		var skipReason string
+		rowErr := s.Reader.QueryRowContext(ctx, `
+SELECT j.state, COALESCE(i.eligible, 1), COALESCE(i.skip_reason, '')
+FROM jobs j
+LEFT JOIN issues i ON i.autopr_issue_id = j.autopr_issue_id
+WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason)
+		if rowErr == nil && eligible == 0 {
+			if skipReason != "" {
+				return fmt.Errorf("job %s cannot be retried: issue ineligible (%s)", jobID, skipReason)
+			}
+			return fmt.Errorf("job %s cannot be retried: issue ineligible", jobID)
+		}
 		return fmt.Errorf("job %s cannot be retried from current state", jobID)
 	}
 	return nil
@@ -558,14 +583,14 @@ FROM llm_sessions WHERE id = ?`
 // Artifact operations.
 
 type Artifact struct {
-	ID              int
-	JobID           string
-	AutoPRIssueID  string
-	Kind            string
-	Content         string
-	Iteration       int
-	CommitSHA       string
-	CreatedAt       string
+	ID            int
+	JobID         string
+	AutoPRIssueID string
+	Kind          string
+	Content       string
+	Iteration     int
+	CommitSHA     string
+	CreatedAt     string
 }
 
 func (s *Store) CreateArtifact(ctx context.Context, jobID, autoprIssueID, kind, content string, iteration int, commitSHA string) (int64, error) {

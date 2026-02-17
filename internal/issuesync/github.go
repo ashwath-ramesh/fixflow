@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"autopr/internal/config"
 	"autopr/internal/db"
@@ -29,9 +30,9 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 	}
 
 	params := url.Values{
-		"state":    {"open"},
-		"per_page": {"100"},
-		"sort":     {"updated"},
+		"state":     {"open"},
+		"per_page":  {"100"},
+		"sort":      {"updated"},
 		"direction": {"asc"},
 	}
 	if cursor != "" {
@@ -65,6 +66,23 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 
 	slog.Debug("sync: github issues fetched", "project", p.Name, "count", len(issues))
 
+	latestUpdated := s.syncGitHubIssues(ctx, p, issues)
+
+	if latestUpdated != "" {
+		if err := s.store.SetCursor(ctx, p.Name, "github", latestUpdated); err != nil {
+			slog.Error("sync: set github cursor", "err", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, issues []githubIssue) string {
+	includeLabels := []string(nil)
+	if p.GitHub != nil {
+		includeLabels = p.GitHub.IncludeLabels
+	}
+
 	var latestUpdated string
 	for _, issue := range issues {
 		// Skip pull requests (they show up in issues API).
@@ -82,6 +100,9 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 			labels = append(labels, l.Name)
 		}
 
+		eligibility := evaluateGitHubIssueEligibility(includeLabels, labels, time.Now().UTC())
+		eligible := eligibility.Eligible
+
 		ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
 			ProjectName:   p.Name,
 			Source:        "github",
@@ -91,6 +112,9 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 			URL:           issue.HTMLURL,
 			State:         "open",
 			Labels:        labels,
+			Eligible:      &eligible,
+			SkipReason:    eligibility.SkipReason,
+			EvaluatedAt:   eligibility.EvaluatedAt,
 			SourceUpdated: issue.UpdatedAt,
 		})
 		if err != nil {
@@ -98,17 +122,18 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 			continue
 		}
 
-		s.createJobIfNeeded(ctx, ffid, p.Name)
+		if eligibility.Eligible {
+			s.createJobIfNeeded(ctx, ffid, p.Name)
+		} else {
+			slog.Info("sync: github issue skipped by label gate",
+				"project", p.Name,
+				"number", issue.Number,
+				"skip_reason", eligibility.SkipReason)
+		}
 		latestUpdated = issue.UpdatedAt
 	}
 
-	if latestUpdated != "" {
-		if err := s.store.SetCursor(ctx, p.Name, "github", latestUpdated); err != nil {
-			slog.Error("sync: set github cursor", "err", err)
-		}
-	}
-
-	return nil
+	return latestUpdated
 }
 
 type githubIssue struct {

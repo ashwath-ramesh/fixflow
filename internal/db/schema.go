@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS issues (
     state             TEXT NOT NULL CHECK(state IN ('open', 'closed')),
     labels_json       TEXT NOT NULL DEFAULT '[]',
     source_meta_json  TEXT NOT NULL DEFAULT '{}',
+    eligible          INTEGER NOT NULL DEFAULT 1 CHECK(eligible IN (0,1)),
+    skip_reason       TEXT NOT NULL DEFAULT '',
+    evaluated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     source_updated_at TEXT NOT NULL,
     synced_at         TEXT NOT NULL,
     UNIQUE(project_name, source, source_issue_id)
@@ -120,6 +123,9 @@ func (s *Store) createSchema() error {
 	_, _ = s.Writer.Exec("ALTER TABLE jobs RENAME COLUMN mr_url TO pr_url")
 	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN pr_merged_at TEXT")
 	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN pr_closed_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1 CHECK(eligible IN (0,1))")
+	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''")
+	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN evaluated_at TEXT NOT NULL DEFAULT ''")
 
 	return nil
 }

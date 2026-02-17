@@ -283,3 +283,73 @@ test_cmd = "make test"
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadNormalizesGitHubIncludeLabels(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  include_labels = [" AutoPR ", "BUG", "autopr", "bug"]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.GitHub == nil {
+		t.Fatalf("expected github project")
+	}
+	got := p.GitHub.IncludeLabels
+	want := []string{"autopr", "bug"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d labels, got %d: %#v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label[%d]: want %q got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestLoadFailsForEmptyGitHubIncludeLabel(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  include_labels = ["autopr", "   "]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "include_labels") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

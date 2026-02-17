@@ -51,17 +51,20 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	issue, issueErr := store.GetIssueByAPID(cmd.Context(), job.AutoPRIssueID)
+
 	if jsonOut {
-		printJSON(map[string]any{
+		payload := map[string]any{
 			"job":       job,
 			"sessions":  sessions,
 			"artifacts": artifacts,
-		})
+		}
+		if issueErr == nil {
+			payload["issue"] = issue
+		}
+		printJSON(payload)
 		return nil
 	}
-
-	// Fetch linked issue for source info.
-	issue, issueErr := store.GetIssueByAPID(cmd.Context(), job.AutoPRIssueID)
 
 	fmt.Printf("Job: %s  State: %s  Retry: %d/%d\n", job.ID, db.DisplayState(job.State, job.PRMergedAt, job.PRClosedAt), job.Iteration, job.MaxIterations)
 	if issueErr == nil && issue.Source != "" && issue.SourceIssueID != "" {
@@ -69,6 +72,15 @@ func runLogs(cmd *cobra.Command, args []string) error {
 			strings.ToUpper(issue.Source[:1])+issue.Source[1:], issue.SourceIssueID, job.ProjectName)
 		if issue.Title != "" {
 			fmt.Printf("Title: %s\n", issue.Title)
+		}
+		if issue.Eligible {
+			fmt.Printf("Eligibility: eligible (evaluated_at: %s)\n", issue.EvaluatedAt)
+		} else {
+			reason := issue.SkipReason
+			if reason == "" {
+				reason = "ineligible"
+			}
+			fmt.Printf("Eligibility: ineligible (reason: %s, evaluated_at: %s)\n", reason, issue.EvaluatedAt)
 		}
 	} else {
 		fmt.Printf("Issue: %s  Project: %s\n", job.AutoPRIssueID, job.ProjectName)
