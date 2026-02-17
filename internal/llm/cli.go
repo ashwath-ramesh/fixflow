@@ -43,7 +43,8 @@ func (p *CLIProvider) Run(ctx context.Context, workDir, prompt string) (Response
 	if err != nil {
 		return Response{}, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	// Discard stderr — LLM tools emit noisy internal warnings (e.g. codex rollout state errors).
+	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
 		return Response{}, fmt.Errorf("start %s: %w", p.name, err)
