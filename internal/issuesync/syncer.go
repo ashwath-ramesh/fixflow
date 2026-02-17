@@ -159,6 +159,7 @@ func (s *Syncer) checkPRStatus(ctx context.Context) {
 				continue
 			}
 			slog.Info("PR merged", "job", db.ShortID(job.ID), "pr_url", job.PRURL)
+			s.cleanupWorktree(ctx, job)
 		} else if status.Closed {
 			closedAt := status.ClosedAt
 			if closedAt == "" {
@@ -169,6 +170,20 @@ func (s *Syncer) checkPRStatus(ctx context.Context) {
 				continue
 			}
 			slog.Info("PR closed", "job", db.ShortID(job.ID), "pr_url", job.PRURL)
+			s.cleanupWorktree(ctx, job)
 		}
 	}
+}
+
+// cleanupWorktree removes the job's worktree directory and clears the DB field.
+func (s *Syncer) cleanupWorktree(ctx context.Context, job db.Job) {
+	if job.WorktreePath == "" {
+		return
+	}
+	git.RemoveJobDir(job.WorktreePath)
+	if err := s.store.ClearWorktreePath(ctx, job.ID); err != nil {
+		slog.Error("cleanup worktree: clear DB path", "job", db.ShortID(job.ID), "err", err)
+		return
+	}
+	slog.Info("worktree cleaned up", "job", db.ShortID(job.ID), "path", job.WorktreePath)
 }
