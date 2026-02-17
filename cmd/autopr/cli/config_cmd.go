@@ -19,11 +19,15 @@ func init() {
 }
 
 func runConfig(cmd *cobra.Command, args []string) error {
+	path, err := resolveConfigPath()
+	if err != nil {
+		return err
+	}
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		editor = "vi"
 	}
-	c := exec.Command(editor, cfgPath)
+	c := exec.Command(editor, path)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr

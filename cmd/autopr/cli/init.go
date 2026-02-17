@@ -1,15 +1,22 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"autopr/internal/config"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Create config template and initialize database",
+	Short: "Set up AutoPR config and credentials",
+	Long:  "Interactive wizard that creates ~/.config/autopr/ with config.toml and credentials.toml.",
 	RunE:  runInit,
 }
 
@@ -18,7 +25,114 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	// Create config template if it doesn't exist.
+	// If --config flag was explicitly set, do a project-local init (backward compat).
+	if cfgPath != "" {
+		return runLocalInit()
+	}
+	return runGlobalInit()
+}
+
+// runGlobalInit is the interactive wizard for ~/.config/autopr/.
+func runGlobalInit() error {
+	reader := bufio.NewReader(os.Stdin)
+
+	configDir, err := config.ConfigDir()
+	if err != nil {
+		return err
+	}
+	cfgFile, err := config.GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	credsFile, err := config.CredentialsPath()
+	if err != nil {
+		return err
+	}
+
+	// 1. Detect existing setup.
+	if _, err := os.Stat(credsFile); err == nil {
+		fmt.Printf("Existing credentials found at %s\n", credsFile)
+		fmt.Print("Re-run setup? [y/N]: ")
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "y" && answer != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	// 2. Create config directory.
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	// 3. Prompt for GitHub token (masked input).
+	fmt.Print("GitHub token (input is hidden): ")
+	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println() // newline after hidden input
+	if err != nil {
+		return fmt.Errorf("read token: %w", err)
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+
+	// 4. If empty, check env var and offer to save it.
+	if token == "" {
+		if envToken := os.Getenv("GITHUB_TOKEN"); envToken != "" {
+			fmt.Print("GITHUB_TOKEN env var detected. Save it to credentials.toml? [Y/n]: ")
+			answer, _ := reader.ReadString('\n')
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer == "" || answer == "y" || answer == "yes" {
+				token = envToken
+			}
+		}
+	}
+
+	// 5. Write credentials.toml (0600), preserving existing fields.
+	creds, err := config.LoadCredentials()
+	if err != nil {
+		creds = &config.Credentials{}
+	}
+	if token != "" {
+		creds.GitHubToken = token
+	}
+	if err := config.SaveCredentials(creds); err != nil {
+		return err
+	}
+	fmt.Printf("Credentials saved: %s\n", credsFile)
+
+	// 6. Create config.toml with defaults (if not exists).
+	if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
+		if err := os.WriteFile(cfgFile, []byte(configTemplate), 0o644); err != nil {
+			return fmt.Errorf("write config: %w", err)
+		}
+		fmt.Printf("Config created: %s\n", cfgFile)
+	} else {
+		fmt.Printf("Config already exists: %s\n", cfgFile)
+	}
+
+	// 7. Initialize DB via LoadMinimal.
+	cfg, err := config.LoadMinimal(cfgFile)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
+		return fmt.Errorf("create db directory: %w", err)
+	}
+	store, err := openStore(cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	fmt.Printf("Database initialized: %s\n", cfg.DBPath)
+	fmt.Println("\nNext steps:")
+	fmt.Printf("  1. Edit your config to add projects: ap config\n")
+	fmt.Printf("  2. Start the TUI:                    ap tui\n")
+	return nil
+}
+
+// runLocalInit creates a project-local config file (backward compat with --config flag).
+func runLocalInit() error {
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		if err := os.WriteFile(cfgPath, []byte(configTemplate), 0o644); err != nil {
 			return fmt.Errorf("write config template: %w", err)
@@ -28,7 +142,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Config already exists: %s\n", cfgPath)
 	}
 
-	// Load config and init DB.
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -40,59 +153,65 @@ func runInit(cmd *cobra.Command, args []string) error {
 	defer store.Close()
 
 	fmt.Printf("Database initialized: %s\n", cfg.DBPath)
-	fmt.Println("Edit autopr.toml to configure your projects, then run: ap start")
+	fmt.Println("Edit the config file to configure your projects, then run: ap start")
 	return nil
 }
 
 const configTemplate = `# AutoPR configuration
 # See: https://github.com/ashwath-ramesh/autopr
+#
+# Tokens: store in ~/.config/autopr/credentials.toml or set env vars
+# (GITHUB_TOKEN, GITLAB_TOKEN, SENTRY_TOKEN, AUTOPR_WEBHOOK_SECRET)
 
 db_path = "autopr.db"
 repos_root = ".repos"
 log_level = "info"              # debug|info|warn|error
-log_file = ""                   # empty = stderr only
+log_file = "autopr.log"         # relative to config dir
 
 [daemon]
-webhook_port = 8080
+webhook_port = 9847
 webhook_secret = ""             # override via AUTOPR_WEBHOOK_SECRET env var
 max_workers = 3
 max_iterations = 3              # implement<->review loop default
 sync_interval = "5m"            # GitHub/Sentry poll interval
 pid_file = "autopr.pid"
+auto_pr = false                 # set true to auto-create PRs after tests pass
 
-[tokens]
-# Override via env: GITLAB_TOKEN, GITHUB_TOKEN, SENTRY_TOKEN
-gitlab = ""
-github = ""
-sentry = ""
-
-[sentry]
-base_url = "https://sentry.io"
+# [sentry]
+# base_url = "https://sentry.io"  # uncomment for self-hosted Sentry
 
 [llm]
-provider = "claude"             # claude|codex
+provider = "codex"              # codex|claude
 
+# --- GitHub example ---
 [[projects]]
 name = "my-project"
-repo_url = "git@gitlab.com:org/repo.git"
+repo_url = "git@github.com:org/repo.git"
 test_cmd = "go test ./..."
 base_branch = "main"
 
-  [projects.gitlab]
-  base_url = "https://gitlab.com"
-  project_id = "12345"
-
-  # [projects.github]
-  # owner = "org"
-  # repo = "repo"
+  [projects.github]
+  owner = "org"
+  repo = "repo"
 
   # [projects.sentry]
   # org = "my-org"
   # project = "my-project"
 
-  [projects.prompts]
-  plan = "templates/prompts/plan.md"
-  plan_review = "templates/prompts/plan_review.md"
-  implement = "templates/prompts/implement.md"
-  code_review = "templates/prompts/code_review.md"
+  # [projects.prompts]
+  # plan = "templates/prompts/plan.md"
+  # plan_review = "templates/prompts/plan_review.md"
+  # implement = "templates/prompts/implement.md"
+  # code_review = "templates/prompts/code_review.md"
+
+# --- GitLab example ---
+# [[projects]]
+# name = "my-gitlab-project"
+# repo_url = "git@gitlab.com:org/repo.git"
+# test_cmd = "make test"
+# base_branch = "main"
+#
+#   [projects.gitlab]
+#   base_url = "https://gitlab.com"   # change for self-hosted GitLab
+#   project_id = "12345"
 `

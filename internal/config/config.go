@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +12,64 @@ import (
 
 	"github.com/BurntSushi/toml"
 )
+
+// Credentials holds tokens loaded from credentials.toml.
+type Credentials struct {
+	GitHubToken        string `toml:"github_token"`
+	GitLabToken        string `toml:"gitlab_token"`
+	SentryToken        string `toml:"sentry_token"`
+	WebhookSecret      string `toml:"webhook_secret"`
+}
+
+// LoadCredentials reads credentials.toml. Returns an empty Credentials if
+// the file does not exist. Warns if the file has insecure permissions.
+func LoadCredentials() (*Credentials, error) {
+	path, err := CredentialsPath()
+	if err != nil {
+		return &Credentials{}, nil
+	}
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return &Credentials{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stat credentials: %w", err)
+	}
+
+	// Warn on insecure permissions (anything beyond owner read/write).
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		slog.Warn("credentials file has insecure permissions",
+			"path", path, "mode", fmt.Sprintf("%04o", perm))
+	}
+
+	creds := &Credentials{}
+	if _, err := toml.DecodeFile(path, creds); err != nil {
+		return nil, fmt.Errorf("decode credentials %s: %w", path, err)
+	}
+	return creds, nil
+}
+
+// SaveCredentials writes credentials.toml with 0600 permissions.
+func SaveCredentials(creds *Credentials) error {
+	path, err := CredentialsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	var buf bytes.Buffer
+	enc := toml.NewEncoder(&buf)
+	if err := enc.Encode(creds); err != nil {
+		return fmt.Errorf("encode credentials: %w", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), fs.FileMode(0o600)); err != nil {
+		return fmt.Errorf("write credentials: %w", err)
+	}
+	return nil
+}
 
 type Config struct {
 	DBPath   string `toml:"db_path"`
@@ -92,11 +152,25 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.BaseDir = filepath.Dir(path)
 	applyDefaults(cfg)
-	applyEnvOverrides(cfg)
+	applyCredentialsAndEnv(cfg)
 	warnTokensInFile(cfg)
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
+	resolvePaths(cfg)
+	return cfg, nil
+}
+
+// LoadMinimal loads config without running validate(). Used by `ap init`
+// where projects may not be configured yet.
+func LoadMinimal(path string) (*Config, error) {
+	cfg := &Config{}
+	if _, err := toml.DecodeFile(path, cfg); err != nil {
+		return nil, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	cfg.BaseDir = filepath.Dir(path)
+	applyDefaults(cfg)
+	applyCredentialsAndEnv(cfg)
 	resolvePaths(cfg)
 	return cfg, nil
 }
@@ -108,11 +182,14 @@ func applyDefaults(cfg *Config) {
 	if cfg.ReposRoot == "" {
 		cfg.ReposRoot = ".repos"
 	}
+	if cfg.LogFile == "" {
+		cfg.LogFile = "autopr.log"
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
 	if cfg.Daemon.WebhookPort == 0 {
-		cfg.Daemon.WebhookPort = 8080
+		cfg.Daemon.WebhookPort = 9847
 	}
 	if cfg.Daemon.MaxWorkers == 0 {
 		cfg.Daemon.MaxWorkers = 3
@@ -130,7 +207,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Sentry.BaseURL = "https://sentry.io"
 	}
 	if cfg.LLM.Provider == "" {
-		cfg.LLM.Provider = "claude"
+		cfg.LLM.Provider = "codex"
 	}
 	for i := range cfg.Projects {
 		if cfg.Projects[i].BaseBranch == "" {
@@ -139,7 +216,30 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-func applyEnvOverrides(cfg *Config) {
+// applyCredentialsAndEnv merges token values from credentials.toml and then
+// from environment variables. Priority (highest → lowest): env > credentials.toml > config file.
+func applyCredentialsAndEnv(cfg *Config) {
+	// Layer credentials.toml on top of config file values.
+	creds, err := LoadCredentials()
+	if err != nil {
+		slog.Warn("failed to load credentials", "error", err)
+	}
+	if creds != nil {
+		if creds.GitHubToken != "" {
+			cfg.Tokens.GitHub = creds.GitHubToken
+		}
+		if creds.GitLabToken != "" {
+			cfg.Tokens.GitLab = creds.GitLabToken
+		}
+		if creds.SentryToken != "" {
+			cfg.Tokens.Sentry = creds.SentryToken
+		}
+		if creds.WebhookSecret != "" {
+			cfg.Daemon.WebhookSecret = creds.WebhookSecret
+		}
+	}
+
+	// Env vars win over everything.
 	if v := os.Getenv("AUTOPR_WEBHOOK_SECRET"); v != "" {
 		cfg.Daemon.WebhookSecret = v
 	}

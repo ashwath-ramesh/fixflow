@@ -34,14 +34,14 @@ test_cmd = "go test ./..."
 	}
 
 	// Check defaults.
-	if cfg.Daemon.WebhookPort != 8080 {
-		t.Fatalf("expected default webhook port 8080, got %d", cfg.Daemon.WebhookPort)
+	if cfg.Daemon.WebhookPort != 9847 {
+		t.Fatalf("expected default webhook port 9847, got %d", cfg.Daemon.WebhookPort)
 	}
 	if cfg.Daemon.MaxWorkers != 3 {
 		t.Fatalf("expected default max workers 3, got %d", cfg.Daemon.MaxWorkers)
 	}
-	if cfg.LLM.Provider != "claude" {
-		t.Fatalf("expected default provider claude, got %s", cfg.LLM.Provider)
+	if cfg.LLM.Provider != "codex" {
+		t.Fatalf("expected default provider codex, got %s", cfg.LLM.Provider)
 	}
 
 	// Check project.

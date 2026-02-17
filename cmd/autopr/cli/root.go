@@ -39,7 +39,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&cfgPath, "config", "c", "autopr.toml", "config file path")
+	rootCmd.PersistentFlags().StringVarP(&cfgPath, "config", "c", "", "config file path")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "output JSON")
 }
@@ -52,8 +52,36 @@ func Execute() error {
 	return nil
 }
 
+// resolveConfigPath determines which config file to use.
+// Priority: --config flag > ./autopr.toml > ~/.config/autopr/config.toml.
+func resolveConfigPath() (string, error) {
+	// 1. Explicit --config flag.
+	if cfgPath != "" {
+		return cfgPath, nil
+	}
+
+	// 2. Local autopr.toml in current directory (backward compat).
+	if _, err := os.Stat("autopr.toml"); err == nil {
+		return "autopr.toml", nil
+	}
+
+	// 3. Global config.
+	globalPath, err := config.GlobalConfigPath()
+	if err == nil {
+		if _, err := os.Stat(globalPath); err == nil {
+			return globalPath, nil
+		}
+	}
+
+	return "", fmt.Errorf("no config file found. Run 'ap init' to set up AutoPR")
+}
+
 func loadConfig() (*config.Config, error) {
-	return config.Load(cfgPath)
+	path, err := resolveConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	return config.Load(path)
 }
 
 func openStore(cfg *config.Config) (*db.Store, error) {
