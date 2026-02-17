@@ -113,8 +113,9 @@ func (r *Runner) handleReviewLoop(ctx context.Context, jobID string, issue db.Is
 	}
 
 	if job.Iteration >= job.MaxIterations {
-		slog.Warn("max iterations reached", "job", jobID, "iterations", job.Iteration)
-		return r.failJob(ctx, jobID, job.State, "max iterations reached")
+		slog.Info("max iterations reached, moving to ready for human review", "job", jobID, "iterations", job.Iteration)
+		_ = r.store.TransitionState(ctx, jobID, job.State, "ready")
+		return nil
 	}
 
 	if err := r.store.IncrementIteration(ctx, jobID); err != nil {
