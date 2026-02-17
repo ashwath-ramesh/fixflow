@@ -804,7 +804,7 @@ func (m Model) listView() string {
 		colProject = 13
 		colSource  = 13
 		colRetry   = 8
-		colIssue   = 40
+		colIssue   = 55
 	)
 
 	if len(m.jobs) == 0 {
