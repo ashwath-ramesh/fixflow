@@ -19,7 +19,6 @@ func init() {
 }
 
 func runLogs(cmd *cobra.Command, args []string) error {
-	jobID := args[0]
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -29,6 +28,11 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer store.Close()
+
+	jobID, err := resolveJob(store, args[0])
+	if err != nil {
+		return err
+	}
 
 	job, err := store.GetJob(cmd.Context(), jobID)
 	if err != nil {
@@ -54,8 +58,19 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Fetch linked issue for source info.
+	issue, issueErr := store.GetIssueByFFID(cmd.Context(), job.FixFlowIssueID)
+
 	fmt.Printf("Job: %s  State: %s  Iteration: %d/%d\n", job.ID, job.State, job.Iteration, job.MaxIterations)
-	fmt.Printf("Issue: %s  Project: %s\n", job.FixFlowIssueID, job.ProjectName)
+	if issueErr == nil && issue.Source != "" && issue.SourceIssueID != "" {
+		fmt.Printf("Issue: %s #%s  Project: %s\n",
+			strings.ToUpper(issue.Source[:1])+issue.Source[1:], issue.SourceIssueID, job.ProjectName)
+		if issue.Title != "" {
+			fmt.Printf("Title: %s\n", issue.Title)
+		}
+	} else {
+		fmt.Printf("Issue: %s  Project: %s\n", job.FixFlowIssueID, job.ProjectName)
+	}
 	if job.BranchName != "" {
 		fmt.Printf("Branch: %s  Commit: %s\n", job.BranchName, job.CommitSHA)
 	}

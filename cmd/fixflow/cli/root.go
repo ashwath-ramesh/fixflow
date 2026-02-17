@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -68,4 +69,9 @@ func printJSON(v any) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+// resolveJob resolves a full or partial job ID from CLI args.
+func resolveJob(store *db.Store, arg string) (string, error) {
+	return store.ResolveJobID(context.Background(), arg)
 }

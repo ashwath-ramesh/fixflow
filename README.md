@@ -30,6 +30,47 @@ for human approval.
 4. **Test** — Runs the project's test command. On pass, pushes the branch.
 5. **Ready** — Waits for human `approve` / `reject` via CLI or TUI.
 
+## Prerequisites
+
+### Build
+
+- Go 1.23+
+- Git
+- SQLite (via `modernc.org/sqlite`, no CGO required)
+
+### LLM Provider (pick one)
+
+**OpenAI Codex CLI:**
+
+```bash
+npm install -g @openai/codex
+```
+
+Requires an OpenAI API key with access to Codex models. Set `OPENAI_API_KEY` in your environment.
+An OpenAI Plus or Pro subscription, or API credits, is needed.
+
+**Anthropic Claude CLI:**
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+Requires an Anthropic API key. Set `ANTHROPIC_API_KEY` in your environment.
+A Claude Max subscription or API credits is needed.
+
+Configure which provider to use in `fixflow.toml`:
+
+```toml
+[llm]
+provider = "codex"   # or "claude"
+```
+
+### Source Tokens
+
+- **GitHub:** Fine-grained PAT with `Contents: Read and write` + `Issues: Read-only`
+- **GitLab:** Project access token with `api` scope
+- **Sentry:** Auth token with `event:read` + `project:read`
+
 ## Quick Start
 
 ```bash
@@ -154,9 +195,48 @@ base_branch = "main"
 | `ff reject <job-id> [-r reason]` | Reject a job in `ready` state |
 | `ff retry <job-id> [-n notes]` | Re-queue a `failed` or `rejected` job |
 | `ff config` | Open `fixflow.toml` in `$EDITOR` |
-| `ff tui` | Interactive terminal dashboard |
+| `ff tui` | Interactive terminal dashboard (see below) |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
+
+### Job ID Prefix Matching
+
+`ff list` shows an 8-character short job ID (e.g. `2dad8b6b`). All action commands
+accept a prefix of any length — just enough to be unambiguous:
+
+```bash
+ff logs 2dad          # matches ff-job-2dad8b6b...
+ff approve 2d         # works if only one job starts with "2d"
+ff reject 2dad8b6b    # full short ID also works
+```
+
+For automation, use `ff list --json` which returns full job IDs.
+
+## TUI Dashboard
+
+`ff tui` launches an interactive terminal UI with keyboard navigation.
+
+**Level 1 — Job List:** Dashboard header showing daemon status, sync interval,
+worker count, and job state counters. Job table shows short job ID, state, project,
+issue source (e.g. GitHub #1), iteration progress, and truncated issue title.
+
+**Level 2 — Job Detail:** Full job metadata plus a pipeline session table showing each step
+(plan, implement, code_review) with status, token usage, and duration. Press `d` to view the
+git diff of changes.
+
+**Level 3 — Session Detail:** Full LLM output rendered as styled markdown with syntax-highlighted
+code blocks (via glamour). Press `tab` to toggle between the input prompt and output response.
+
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate up/down |
+| `enter` | Drill into selected item |
+| `esc` | Go back one level |
+| `tab` | Toggle input/output (session view) |
+| `d` | View git diff (job detail) |
+| `u/d` | Half-page scroll (session/diff view) |
+| `r` | Refresh data |
+| `q` | Quit |
 
 ## Job States
 
@@ -191,6 +271,16 @@ Prompt templates support these placeholders:
 | `{{plan}}` | Plan artifact content |
 | `{{review_feedback}}` | Previous review + test output |
 
+## Health Check
+
+The daemon exposes a health endpoint on the webhook port:
+
+```bash
+curl http://localhost:8088/health
+```
+
+Returns JSON with `status`, `uptime_seconds`, and `job_queue_depth`.
+
 ## Architecture
 
 ```
@@ -207,13 +297,6 @@ internal/
   webhook/             GitLab webhook handler
   worker/              Concurrent job processing pool
 ```
-
-## Requirements
-
-- Go 1.23+
-- `claude` CLI or `codex` CLI on `$PATH`
-- Git
-- SQLite (via `modernc.org/sqlite`, no CGO required)
 
 ## Development
 

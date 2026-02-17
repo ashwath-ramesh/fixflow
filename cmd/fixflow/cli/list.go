@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"fixflow/internal/db"
+
 	"github.com/spf13/cobra"
 )
 
@@ -50,11 +52,19 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-20s %-12s %-15s %-4s %-20s\n", "JOB ID", "STATE", "PROJECT", "ITER", "UPDATED")
-	fmt.Println(strings.Repeat("-", 75))
+	fmt.Printf("%-10s %-14s %-13s %-13s %-5s %-40s %s\n", "JOB", "STATE", "PROJECT", "SOURCE", "ITER", "ISSUE", "UPDATED")
+	fmt.Println(strings.Repeat("-", 115))
 	for _, j := range jobs {
-		fmt.Printf("%-20s %-12s %-15s %d/%-2d %-20s\n",
-			truncate(j.ID, 20), j.State, truncate(j.ProjectName, 15), j.Iteration, j.MaxIterations, j.UpdatedAt)
+		source := ""
+		if j.IssueSource != "" && j.SourceIssueID != "" {
+			source = fmt.Sprintf("%s #%s", capitalize(j.IssueSource), j.SourceIssueID)
+		}
+		title := truncate(j.IssueTitle, 40)
+
+		fmt.Printf("%-10s %-14s %-13s %-13s %-5s %-40s %s\n",
+			db.ShortID(j.ID), j.State, truncate(j.ProjectName, 12), source,
+			fmt.Sprintf("%d/%d", j.Iteration, j.MaxIterations),
+			title, j.UpdatedAt)
 	}
 	return nil
 }
@@ -63,5 +73,15 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	if n <= 3 {
+		return s[:n]
+	}
 	return s[:n-3] + "..."
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

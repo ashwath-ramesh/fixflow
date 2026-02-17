@@ -114,6 +114,10 @@ func (s *Store) createSchema() error {
 			return fmt.Errorf("insert schema version: %w", err)
 		}
 	}
+
+	// Migrations: add columns that may not exist in older schemas.
+	_, _ = s.Writer.Exec("ALTER TABLE llm_sessions ADD COLUMN prompt_text TEXT")
+
 	return nil
 }
 

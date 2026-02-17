@@ -18,7 +18,6 @@ func init() {
 }
 
 func runApprove(cmd *cobra.Command, args []string) error {
-	jobID := args[0]
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -28,6 +27,11 @@ func runApprove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer store.Close()
+
+	jobID, err := resolveJob(store, args[0])
+	if err != nil {
+		return err
+	}
 
 	job, err := store.GetJob(cmd.Context(), jobID)
 	if err != nil {

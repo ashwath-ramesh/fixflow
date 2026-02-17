@@ -148,7 +148,7 @@ func (r *Runner) invokeProvider(ctx context.Context, jobID, step string, iterati
 		errMsg = runErr.Error()
 	}
 
-	_ = r.store.CompleteSession(ctx, sessionID, status, resp.Text, "", resp.JSONLPath, resp.CommitSHA, errMsg, resp.InputTokens, resp.OutputTokens, resp.DurationMS)
+	_ = r.store.CompleteSession(ctx, sessionID, status, resp.Text, prompt, "", resp.JSONLPath, resp.CommitSHA, errMsg, resp.InputTokens, resp.OutputTokens, resp.DurationMS)
 
 	if runErr != nil {
 		return resp, runErr

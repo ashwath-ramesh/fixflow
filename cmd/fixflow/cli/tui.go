@@ -30,7 +30,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 	defer store.Close()
 
-	model := tui.NewModel(store)
+	model := tui.NewModel(store, cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui error: %w", err)

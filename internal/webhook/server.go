@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -20,10 +21,11 @@ const maxBodySize = 1 << 20 // 1MB
 
 // Server handles GitLab webhook events.
 type Server struct {
-	cfg   *config.Config
-	store *db.Store
-	jobCh chan<- string
-	mux   *http.ServeMux
+	cfg       *config.Config
+	store     *db.Store
+	jobCh     chan<- string
+	mux       *http.ServeMux
+	startedAt time.Time
 
 	// Simple rate limiter: per-IP request count per window.
 	mu         sync.Mutex
@@ -33,10 +35,11 @@ type Server struct {
 
 func NewServer(cfg *config.Config, store *db.Store, jobCh chan<- string) *Server {
 	s := &Server{
-		cfg:   cfg,
-		store: store,
-		jobCh: jobCh,
-		rates: make(map[string]int),
+		cfg:       cfg,
+		store:     store,
+		jobCh:     jobCh,
+		startedAt: time.Now(),
+		rates:     make(map[string]int),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook", s.handleWebhook)
@@ -50,8 +53,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	jobQueueDepth, err := s.queuedJobDepth(r.Context())
+	if err != nil {
+		slog.Error("health: queued jobs count", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	uptimeSeconds := int(time.Since(s.startedAt).Seconds())
+	if uptimeSeconds < 0 {
+		uptimeSeconds = 0
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "running",
+		"uptime_seconds":  uptimeSeconds,
+		"job_queue_depth": jobQueueDepth,
+	})
+}
+
+func (s *Server) queuedJobDepth(ctx context.Context) (int, error) {
+	const q = `SELECT COUNT(*) FROM jobs WHERE state = 'queued'`
+	var count int
+	if err := s.store.Reader.QueryRowContext(ctx, q).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count queued jobs: %w", err)
+	}
+	return count, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
