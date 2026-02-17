@@ -6,15 +6,15 @@ Run an exhaustive review for this FixFlow worktree using:
 - reviewed plan (intent)
 - current code diff (actual implementation)
 
-# FIXFLOW INPUT CONTEXT
-Assume these are already provided in prompt context:
-- `Reviewed plan:` block (from `{{PLAN_FILE}}`)
-- `Committed branch diff (base...HEAD):` block (base = `origin/HEAD`, fallback `origin/main`, fallback `origin/master`)
-- `Staged diff:` block (`git diff --cached`)
-- `Unstaged diff:` block (`git diff`)
+# ISSUE
+Title: {{title}}
 
-Do NOT ask for PR URL, issue URL, or target branch. Review what is provided.
-Review scope is ONLY the specific fix/PR/feature represented by this provided plan + diff context.
+{{body}}
+
+# PLAN
+{{plan}}
+
+Review scope is ONLY the specific fix/feature represented by the plan above.
 Do NOT perform repo-wide audits or include unrelated issues.
 
 ---
@@ -239,7 +239,6 @@ Run ALL or most lenses internally in parallel:
 ## OUTPUT FORMAT (MANDATORY MARKDOWN)
 
 ## Review Target
-- Reviewed plan file: `{{PLAN_FILE}}`
 - Branch/worktree: current
 - Scope: Small / Medium / Large
 - Changed files: short list or count

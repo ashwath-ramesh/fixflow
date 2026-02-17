@@ -88,8 +88,8 @@ func (p *CLIProvider) Run(ctx context.Context, workDir, prompt string) (Response
 		}
 
 		switch {
+		// Claude format: assistant messages with content blocks.
 		case msg.Type == "assistant" && msg.Message.Content != nil:
-			// Claude format: assistant messages with content blocks.
 			for _, block := range msg.Message.Content {
 				if block.Type == "text" && block.Text != "" {
 					lastText = block.Text
@@ -102,10 +102,20 @@ func (p *CLIProvider) Run(ctx context.Context, workDir, prompt string) (Response
 				totalOut += msg.Message.Usage.OutputTokens
 			}
 		case msg.Type == "result":
-			// Codex/Claude result message.
 			if msg.Result != "" {
 				lastText = msg.Result
 			}
+
+		// Codex format: item.completed with nested item object.
+		case msg.Type == "item.completed" && msg.Item != nil:
+			if msg.Item.Type == "agent_message" && msg.Item.Text != "" {
+				lastText = msg.Item.Text
+			}
+
+		// Codex format: turn.completed with usage stats.
+		case msg.Type == "turn.completed" && msg.Usage != nil:
+			totalIn += msg.Usage.InputTokens
+			totalOut += msg.Usage.OutputTokens
 		}
 	}
 
@@ -156,12 +166,18 @@ func detectLatestCommit(ctx context.Context, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// JSONL message types for Claude CLI streaming output.
+// JSONL message types — supports both Claude and Codex formats.
 
 type jsonlMessage struct {
-	Type    string      `json:"type"`
+	Type string `json:"type"`
+
+	// Claude format fields.
 	Message jsonlAssist `json:"message,omitempty"`
 	Result  string      `json:"result,omitempty"`
+
+	// Codex format fields.
+	Item  *jsonlItem  `json:"item,omitempty"`
+	Usage *jsonlUsage `json:"usage,omitempty"`
 }
 
 type jsonlAssist struct {
@@ -170,6 +186,11 @@ type jsonlAssist struct {
 }
 
 type jsonlBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type jsonlItem struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 }
