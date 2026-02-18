@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -11,11 +12,14 @@ import (
 
 	"autopr/internal/config"
 	"autopr/internal/daemon"
+	"autopr/internal/update"
 
 	"github.com/spf13/cobra"
 )
 
 var foreground bool
+
+const skipUpdateNoticeEnv = "AUTOPR_SKIP_UPDATE_NOTICE"
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -29,20 +33,49 @@ func init() {
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
+	return runStartWith(
+		loadConfig,
+		daemon.IsRunning,
+		maybePrintUpgradeNotice,
+		func(currentVersion string) startVersionChecker {
+			return update.NewManager(currentVersion)
+		},
+		runForeground,
+		runBackground,
+	)
+}
+
+type noticePrinterFunc func(string, io.Writer, startVersionChecker)
+type checkerFactoryFunc func(string) startVersionChecker
+type daemonRunningFunc func(string) bool
+type startRunnerFunc func(*config.Config) error
+
+func runStartWith(
+	loadConfigFn func() (*config.Config, error),
+	isDaemonRunning daemonRunningFunc,
+	noticePrinter noticePrinterFunc,
+	checkerFactory checkerFactoryFunc,
+	runForegroundFn startRunnerFunc,
+	runBackgroundFn startRunnerFunc,
+) error {
+	cfg, err := loadConfigFn()
 	if err != nil {
 		return err
 	}
 
 	// Check if already running.
-	if daemon.IsRunning(cfg.Daemon.PIDFile) {
+	if isDaemonRunning(cfg.Daemon.PIDFile) {
 		return fmt.Errorf("daemon is already running (see %s)", cfg.Daemon.PIDFile)
 	}
 
-	if foreground {
-		return runForeground(cfg)
+	if shouldCheckForUpdates() {
+		noticePrinter(version, os.Stdout, checkerFactory(version))
 	}
-	return runBackground(cfg)
+
+	if foreground {
+		return runForegroundFn(cfg)
+	}
+	return runBackgroundFn(cfg)
 }
 
 // runForeground configures logging and runs the daemon in the current process.
@@ -96,6 +129,7 @@ func runBackground(cfg *config.Config) error {
 	child.Stdout = logFile
 	child.Stderr = logFile
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	child.Env = childEnvWithSkippedUpdateNotice()
 
 	if err := child.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
@@ -119,4 +153,12 @@ func runBackground(cfg *config.Config) error {
 
 	fmt.Printf("Daemon started (pid %d), log: %s\n", child.Process.Pid, logPath)
 	return nil
+}
+
+func shouldCheckForUpdates() bool {
+	return os.Getenv(skipUpdateNoticeEnv) != "1"
+}
+
+func childEnvWithSkippedUpdateNotice() []string {
+	return append(os.Environ(), skipUpdateNoticeEnv+"=1")
 }

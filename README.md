@@ -12,6 +12,13 @@ for human approval.
 curl -fsSL https://raw.githubusercontent.com/ashwath-ramesh/autopr/master/scripts/install.sh | bash
 ```
 
+Upgrade later from CLI:
+
+```bash
+ap upgrade
+ap upgrade --check
+```
+
 **From source (any platform with Go 1.23+):**
 
 ```bash
@@ -129,7 +136,7 @@ AutoPR follows the [XDG Base Directory Specification](https://specifications.fre
 |-----------|---------|----------|
 | Config | `~/.config/autopr/` | `config.toml`, `credentials.toml` |
 | Data | `~/.local/share/autopr/` | `autopr.db`, `repos/` |
-| State | `~/.local/state/autopr/` | `autopr.log`, `autopr.pid` |
+| State | `~/.local/state/autopr/` | `autopr.log`, `autopr.pid`, `version-check.json` |
 
 Override with `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, or `XDG_STATE_HOME`. Run `ap paths` to see resolved locations.
 
@@ -185,6 +192,7 @@ log_file = "/custom/path/autopr.log"
 |---------|-------------|
 | `ap init` | Interactive setup wizard |
 | `ap start [-f]` | Start the daemon (`-f` for foreground) |
+| `ap upgrade [--check]` | Check for and install the latest `ap` release |
 | `ap stop` | Gracefully stop the daemon |
 | `ap status` | Show daemon status and job counts |
 | `ap list [--project X] [--state Y]` | List jobs with optional filters |
@@ -199,6 +207,7 @@ log_file = "/custom/path/autopr.log"
 | `ap tui` | Interactive terminal dashboard |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
+`ap start` checks for new releases at most once every 24h and prints a non-blocking upgrade notice when available.
 
 ### Job ID Prefix Matching
 
