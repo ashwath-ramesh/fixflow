@@ -5,9 +5,16 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/mattn/go-sqlite3"
 )
+
+// ErrDuplicateActiveJob is returned when attempting to create a job for an issue
+// that already has an active job (caught by the partial unique index).
+var ErrDuplicateActiveJob = errors.New("an active job already exists for this issue")
 
 // ValidTransitions defines the allowed state machine transitions.
 var ValidTransitions = map[string][]string{
@@ -127,6 +134,10 @@ func (s *Store) CreateJob(ctx context.Context, autoprIssueID, projectName string
 	const q = `INSERT INTO jobs(id, autopr_issue_id, project_name, state, max_iterations) VALUES(?,?,?,'queued',?)`
 	_, err = s.Writer.ExecContext(ctx, q, id, autoprIssueID, projectName, maxIterations)
 	if err != nil {
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
+			return "", ErrDuplicateActiveJob
+		}
 		return "", fmt.Errorf("create job: %w", err)
 	}
 	return id, nil
@@ -296,6 +307,17 @@ WHERE id = ? AND state IN ('failed', 'rejected', 'cancelled')
   AND EXISTS (
     SELECT 1 FROM issues i
     WHERE i.autopr_issue_id = jobs.autopr_issue_id AND i.eligible = 1
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM jobs AS sibling
+    WHERE sibling.autopr_issue_id = jobs.autopr_issue_id
+      AND sibling.id != jobs.id
+      AND (
+        sibling.state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
+        OR (sibling.state = 'approved' AND sibling.pr_url != ''
+            AND (sibling.pr_merged_at IS NULL OR sibling.pr_merged_at = '')
+            AND (sibling.pr_closed_at IS NULL OR sibling.pr_closed_at = ''))
+      )
   )`, notes, jobID)
 	if err != nil {
 		return fmt.Errorf("reset job %s: %w", jobID, err)
@@ -305,11 +327,26 @@ WHERE id = ? AND state IN ('failed', 'rejected', 'cancelled')
 		var state string
 		var eligible int
 		var skipReason string
+		var siblingID string
 		rowErr := s.Reader.QueryRowContext(ctx, `
-SELECT j.state, COALESCE(i.eligible, 1), COALESCE(i.skip_reason, '')
+SELECT j.state, COALESCE(i.eligible, 1), COALESCE(i.skip_reason, ''),
+       COALESCE((
+         SELECT s.id FROM jobs s
+         WHERE s.autopr_issue_id = j.autopr_issue_id AND s.id != j.id
+           AND (
+             s.state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
+             OR (s.state = 'approved' AND s.pr_url != ''
+                 AND (s.pr_merged_at IS NULL OR s.pr_merged_at = '')
+                 AND (s.pr_closed_at IS NULL OR s.pr_closed_at = ''))
+           )
+         LIMIT 1
+       ), '')
 FROM jobs j
 LEFT JOIN issues i ON i.autopr_issue_id = j.autopr_issue_id
-WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason)
+WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason, &siblingID)
+		if rowErr == nil && siblingID != "" {
+			return fmt.Errorf("cannot retry: another active job (%s) already exists for this issue", siblingID)
+		}
 		if rowErr == nil && eligible == 0 {
 			if skipReason != "" {
 				return fmt.Errorf("job %s cannot be retried: issue ineligible (%s)", jobID, skipReason)
@@ -515,6 +552,23 @@ func (s *Store) HasActiveJobForIssue(ctx context.Context, autoprIssueID string) 
 		return false, fmt.Errorf("check active job: %w", err)
 	}
 	return count > 0, nil
+}
+
+// GetActiveJobForIssue returns the ID of an active job for the given issue, or empty string if none.
+func (s *Store) GetActiveJobForIssue(ctx context.Context, autoprIssueID string) (string, error) {
+	const q = `SELECT id FROM jobs WHERE autopr_issue_id = ? AND (
+		state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
+		OR (state = 'approved' AND pr_url != '' AND (pr_merged_at IS NULL OR pr_merged_at = '') AND (pr_closed_at IS NULL OR pr_closed_at = ''))
+	) LIMIT 1`
+	var id string
+	err := s.Reader.QueryRowContext(ctx, q, autoprIssueID).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("get active job for issue: %w", err)
+	}
+	return id, nil
 }
 
 // LLM Session operations.

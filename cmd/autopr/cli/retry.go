@@ -45,6 +45,15 @@ func runRetry(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %s is in state %q, must be 'failed', 'rejected', or 'cancelled' to retry", jobID, job.State)
 	}
 
+	// Proactive check: give a clear error if another active job already exists for this issue.
+	activeID, err := store.GetActiveJobForIssue(cmd.Context(), job.AutoPRIssueID)
+	if err != nil {
+		return err
+	}
+	if activeID != "" {
+		return fmt.Errorf("cannot retry: another active job (%s) already exists for this issue", activeID)
+	}
+
 	if err := store.ResetJobForRetry(cmd.Context(), jobID, retryNotes); err != nil {
 		return err
 	}
