@@ -14,6 +14,8 @@ import (
 // that already has an active job (caught by the partial unique index).
 var ErrDuplicateActiveJob = errors.New("an active job already exists for this issue")
 
+const CancelReasonSourceIssueClosed = "source issue closed"
+
 // ValidTransitions defines the allowed state machine transitions.
 var ValidTransitions = map[string][]string{
 	"queued":       {"planning", "cancelled"},
@@ -453,6 +455,36 @@ WHERE state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')
 RETURNING id`)
 	if err != nil {
 		return nil, fmt.Errorf("cancel all jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan cancelled job id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("collect cancelled job ids: %w", err)
+	}
+	return ids, nil
+}
+
+// CancelCancellableJobsForIssue cancels all cancellable jobs for a specific issue.
+func (s *Store) CancelCancellableJobsForIssue(ctx context.Context, autoprIssueID, reason string) ([]string, error) {
+	rows, err := s.Writer.QueryContext(ctx, `
+UPDATE jobs
+SET state = 'cancelled',
+    error_message = ?,
+    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE autopr_issue_id = ?
+  AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')
+RETURNING id`, reason, autoprIssueID)
+	if err != nil {
+		return nil, fmt.Errorf("cancel jobs for issue %s: %w", autoprIssueID, err)
 	}
 	defer rows.Close()
 

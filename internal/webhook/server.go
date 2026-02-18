@@ -139,8 +139,8 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only process open/reopen actions.
-	if event.ObjectAttributes.Action != "open" && event.ObjectAttributes.Action != "reopen" {
+	action := event.ObjectAttributes.Action
+	if action != "open" && action != "reopen" && action != "close" {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -162,19 +162,46 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Upsert issue.
 	ctx := r.Context()
+	sourceIssueID := fmt.Sprintf("%d", event.ObjectAttributes.IID)
+	state := "open"
+	if action == "close" {
+		state = "closed"
+	}
 	ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
 		ProjectName:   projectCfg.Name,
 		Source:        "gitlab",
-		SourceIssueID: fmt.Sprintf("%d", event.ObjectAttributes.IID),
+		SourceIssueID: sourceIssueID,
 		Title:         event.ObjectAttributes.Title,
 		Body:          event.ObjectAttributes.Description,
 		URL:           event.ObjectAttributes.URL,
-		State:         "open",
+		State:         state,
 		Labels:        event.Labels(),
 	})
 	if err != nil {
 		slog.Error("webhook: upsert issue", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if action == "close" {
+		cancelledIDs, err := s.store.CancelCancellableJobsForIssue(ctx, ffid, db.CancelReasonSourceIssueClosed)
+		if err != nil {
+			slog.Error("webhook: cancel jobs for closed issue", "project", projectCfg.Name, "issue", sourceIssueID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		for _, jobID := range cancelledIDs {
+			if err := s.store.MarkRunningSessionsCancelled(ctx, jobID); err != nil {
+				slog.Warn("webhook: mark running sessions cancelled", "job_id", jobID, "err", err)
+			}
+			slog.Info("webhook: cancelled job for closed issue",
+				"project", projectCfg.Name,
+				"source", "gitlab",
+				"issue", sourceIssueID,
+				"job_id", jobID,
+				"reason", db.CancelReasonSourceIssueClosed)
+		}
+		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
@@ -233,10 +260,10 @@ func containsAPMarker(desc string) bool {
 // GitLab webhook payload types.
 
 type gitlabIssueEvent struct {
-	ObjectKind       string               `json:"object_kind"`
-	ObjectAttributes gitlabIssueAttrs     `json:"object_attributes"`
-	Project          gitlabProject        `json:"project"`
-	LabelsRaw        []gitlabLabel        `json:"labels"`
+	ObjectKind       string           `json:"object_kind"`
+	ObjectAttributes gitlabIssueAttrs `json:"object_attributes"`
+	Project          gitlabProject    `json:"project"`
+	LabelsRaw        []gitlabLabel    `json:"labels"`
 }
 
 func (e gitlabIssueEvent) Labels() []string {

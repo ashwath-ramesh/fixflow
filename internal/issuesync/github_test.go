@@ -201,6 +201,146 @@ func TestSyncGitHubIssuesIdempotentWhileActiveJobExists(t *testing.T) {
 	}
 }
 
+func TestSyncGitHubIssuesClosedIssueCancelsActiveJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{MaxIterations: 3},
+	}
+	project := &config.ProjectConfig{
+		Name: "my-project",
+		GitHub: &config.ProjectGitHub{
+			Owner: "org",
+			Repo:  "repo",
+		},
+	}
+	syncer := NewSyncer(cfg, store, make(chan string, 8))
+
+	syncer.syncGitHubIssues(ctx, project, []githubIssue{
+		{
+			Number:    11,
+			State:     "open",
+			Title:     "active issue",
+			Body:      "body",
+			HTMLURL:   "https://github.com/org/repo/issues/11",
+			UpdatedAt: "2026-02-17T12:00:00Z",
+		},
+	})
+	if countJobs(t, ctx, store) != 1 {
+		t.Fatalf("expected one job after open sync")
+	}
+
+	jobID := getOnlyJobID(t, ctx, store)
+	if _, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", ""); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	syncer.syncGitHubIssues(ctx, project, []githubIssue{
+		{
+			Number:    11,
+			State:     "closed",
+			Title:     "active issue",
+			Body:      "body",
+			HTMLURL:   "https://github.com/org/repo/issues/11",
+			UpdatedAt: "2026-02-17T12:05:00Z",
+		},
+	})
+
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "cancelled" {
+		t.Fatalf("expected cancelled state, got %q", job.State)
+	}
+	if job.ErrorMessage != db.CancelReasonSourceIssueClosed {
+		t.Fatalf("expected error_message %q, got %q", db.CancelReasonSourceIssueClosed, job.ErrorMessage)
+	}
+
+	sessions, err := store.ListSessionsByJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].Status != "cancelled" {
+		t.Fatalf("expected cancelled running session, got %+v", sessions)
+	}
+
+	issue := getIssueBySourceID(t, ctx, store, "my-project", "github", "11")
+	if issue.State != "closed" {
+		t.Fatalf("expected issue state=closed, got %q", issue.State)
+	}
+}
+
+func TestSyncGitHubIssuesClosedIssueDoesNotTouchNonCancellableStates(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{"ready", "approved", "rejected", "failed", "cancelled"}
+	for _, state := range tests {
+		state := state
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			store := openTestStore(t)
+			defer store.Close()
+
+			cfg := &config.Config{
+				Daemon: config.DaemonConfig{MaxIterations: 3},
+			}
+			project := &config.ProjectConfig{
+				Name: "my-project",
+				GitHub: &config.ProjectGitHub{
+					Owner: "org",
+					Repo:  "repo",
+				},
+			}
+			syncer := NewSyncer(cfg, store, make(chan string, 8))
+
+			syncer.syncGitHubIssues(ctx, project, []githubIssue{
+				{
+					Number:    12,
+					State:     "open",
+					Title:     "terminal state issue",
+					Body:      "body",
+					HTMLURL:   "https://github.com/org/repo/issues/12",
+					UpdatedAt: "2026-02-17T12:10:00Z",
+				},
+			})
+			jobID := getOnlyJobID(t, ctx, store)
+			moveJobToState(t, ctx, store, jobID, state)
+
+			syncer.syncGitHubIssues(ctx, project, []githubIssue{
+				{
+					Number:    12,
+					State:     "closed",
+					Title:     "terminal state issue",
+					Body:      "body",
+					HTMLURL:   "https://github.com/org/repo/issues/12",
+					UpdatedAt: "2026-02-17T12:15:00Z",
+				},
+			})
+
+			job, err := store.GetJob(ctx, jobID)
+			if err != nil {
+				t.Fatalf("get job: %v", err)
+			}
+			if job.State != state {
+				t.Fatalf("expected state %q to stay unchanged, got %q", state, job.State)
+			}
+			if job.ErrorMessage == db.CancelReasonSourceIssueClosed {
+				t.Fatalf("unexpected cancel reason overwrite for state %q", state)
+			}
+
+			issue := getIssueBySourceID(t, ctx, store, "my-project", "github", "12")
+			if issue.State != "closed" {
+				t.Fatalf("expected issue state=closed, got %q", issue.State)
+			}
+		})
+	}
+}
+
 func openTestStore(t *testing.T) *db.Store {
 	t.Helper()
 	store, err := db.Open(filepath.Join(t.TempDir(), "autopr.db"))
@@ -244,6 +384,74 @@ func getOnlyJobID(t *testing.T, ctx context.Context, store *db.Store) string {
 		t.Fatalf("get only job id: %v", err)
 	}
 	return jobID
+}
+
+func TestGitHubIssueQueryParams(t *testing.T) {
+	t.Parallel()
+
+	noCursor := githubIssueQueryParams("")
+	if noCursor.Get("state") != "open" {
+		t.Fatalf("expected state=open, got %q", noCursor.Get("state"))
+	}
+	if noCursor.Get("since") != "" {
+		t.Fatalf("expected empty since for initial sync, got %q", noCursor.Get("since"))
+	}
+
+	withCursor := githubIssueQueryParams("2026-02-17T12:00:00Z")
+	if withCursor.Get("state") != "all" {
+		t.Fatalf("expected state=all when cursor exists, got %q", withCursor.Get("state"))
+	}
+	if withCursor.Get("since") != "2026-02-17T12:00:00Z" {
+		t.Fatalf("expected since to be set, got %q", withCursor.Get("since"))
+	}
+}
+
+func moveJobToState(t *testing.T, ctx context.Context, store *db.Store, jobID, state string) {
+	t.Helper()
+
+	switch state {
+	case "ready", "approved", "rejected":
+		claimedID, err := store.ClaimJob(ctx)
+		if err != nil || claimedID != jobID {
+			t.Fatalf("claim: id=%q err=%v", claimedID, err)
+		}
+		if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
+			t.Fatalf("planning->implementing: %v", err)
+		}
+		if err := store.TransitionState(ctx, jobID, "implementing", "reviewing"); err != nil {
+			t.Fatalf("implementing->reviewing: %v", err)
+		}
+		if err := store.TransitionState(ctx, jobID, "reviewing", "testing"); err != nil {
+			t.Fatalf("reviewing->testing: %v", err)
+		}
+		if err := store.TransitionState(ctx, jobID, "testing", "ready"); err != nil {
+			t.Fatalf("testing->ready: %v", err)
+		}
+		if state == "approved" {
+			if err := store.TransitionState(ctx, jobID, "ready", "approved"); err != nil {
+				t.Fatalf("ready->approved: %v", err)
+			}
+		}
+		if state == "rejected" {
+			if err := store.TransitionState(ctx, jobID, "ready", "rejected"); err != nil {
+				t.Fatalf("ready->rejected: %v", err)
+			}
+		}
+	case "failed":
+		claimedID, err := store.ClaimJob(ctx)
+		if err != nil || claimedID != jobID {
+			t.Fatalf("claim: id=%q err=%v", claimedID, err)
+		}
+		if err := store.TransitionState(ctx, jobID, "planning", "failed"); err != nil {
+			t.Fatalf("planning->failed: %v", err)
+		}
+	case "cancelled":
+		if err := store.CancelJob(ctx, jobID); err != nil {
+			t.Fatalf("cancel job: %v", err)
+		}
+	default:
+		t.Fatalf("unsupported target state %q", state)
+	}
 }
 
 func TestParseGitHubNextURL(t *testing.T) {
