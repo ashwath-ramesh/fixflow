@@ -106,3 +106,29 @@ func TestFindGitLabMR_EmptyWhenNoMatches(t *testing.T) {
 		t.Fatalf("want empty string, got %q", got)
 	}
 }
+
+func TestFindGitLabMRByBranch_StateAll(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("state"); got != "all" {
+			t.Fatalf("want state=all, got %q", got)
+		}
+		if got := r.URL.Query().Get("source_branch"); got != "feat/branch" {
+			t.Fatalf("want source_branch=feat/branch, got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode([]map[string]string{
+			{"web_url": "https://gitlab.com/org/repo/-/merge_requests/99"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := FindGitLabMRByBranch(context.Background(), "tok", srv.URL, "123", "feat/branch", "all")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://gitlab.com/org/repo/-/merge_requests/99" {
+		t.Fatalf("want MR URL, got %q", got)
+	}
+}

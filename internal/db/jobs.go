@@ -194,6 +194,21 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 	return nil
 }
 
+// EnsureJobApproved transitions a ready job to approved. If the job is already
+// approved (or in another state due to concurrent updates), this is a no-op.
+func (s *Store) EnsureJobApproved(ctx context.Context, jobID string) error {
+	_, err := s.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET state = 'approved',
+    completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ? AND state = 'ready'`, jobID)
+	if err != nil {
+		return fmt.Errorf("ensure job approved %s: %w", jobID, err)
+	}
+	return nil
+}
+
 func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	const q = `
 SELECT id, autopr_issue_id, project_name, state, iteration, max_iterations,
@@ -479,6 +494,48 @@ ORDER BY j.updated_at DESC`
 			&j.IssueSource, &j.SourceIssueID, &j.IssueTitle, &j.IssueURL,
 		); err != nil {
 			return nil, fmt.Errorf("scan approved job: %w", err)
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ListReadyOrApprovedJobsWithBranchNoPR returns ready/approved jobs that have
+// a branch but no PR URL and haven't been marked as merged or closed.
+func (s *Store) ListReadyOrApprovedJobsWithBranchNoPR(ctx context.Context) ([]Job, error) {
+	const q = `
+SELECT j.id, j.autopr_issue_id, j.project_name, j.state, j.iteration, j.max_iterations,
+       COALESCE(j.worktree_path,''), COALESCE(j.branch_name,''), COALESCE(j.commit_sha,''),
+       COALESCE(j.human_notes,''), COALESCE(j.error_message,''), COALESCE(j.pr_url,''),
+       COALESCE(j.reject_reason,''), COALESCE(j.pr_merged_at,''), COALESCE(j.pr_closed_at,''),
+       j.created_at, j.updated_at, COALESCE(j.started_at,''), COALESCE(j.completed_at,''),
+       COALESCE(i.source,''), COALESCE(i.source_issue_id,''), COALESCE(i.title,''), COALESCE(i.url,'')
+FROM jobs j
+LEFT JOIN issues i ON j.autopr_issue_id = i.autopr_issue_id
+WHERE j.state IN ('ready', 'approved')
+  AND COALESCE(j.branch_name, '') != ''
+  AND COALESCE(j.pr_url, '') = ''
+  AND (j.pr_merged_at IS NULL OR j.pr_merged_at = '')
+  AND (j.pr_closed_at IS NULL OR j.pr_closed_at = '')
+ORDER BY j.updated_at DESC`
+	rows, err := s.Reader.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list ready/approved jobs with branch and no PR: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := rows.Scan(
+			&j.ID, &j.AutoPRIssueID, &j.ProjectName, &j.State, &j.Iteration, &j.MaxIterations,
+			&j.WorktreePath, &j.BranchName, &j.CommitSHA,
+			&j.HumanNotes, &j.ErrorMessage, &j.PRURL,
+			&j.RejectReason, &j.PRMergedAt, &j.PRClosedAt,
+			&j.CreatedAt, &j.UpdatedAt, &j.StartedAt, &j.CompletedAt,
+			&j.IssueSource, &j.SourceIssueID, &j.IssueTitle, &j.IssueURL,
+		); err != nil {
+			return nil, fmt.Errorf("scan ready/approved branch job: %w", err)
 		}
 		out = append(out, j)
 	}

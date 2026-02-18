@@ -1591,3 +1591,107 @@ func TestCreateSessionStoresJSONLPath(t *testing.T) {
 		t.Fatalf("expected jsonl path %q, got %q", jsonlPath, sess.JSONLPath)
 	}
 }
+
+func TestListReadyOrApprovedJobsWithBranchNoPR(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	keepReady := createTestJobWithState(t, ctx, store, "ready-branch", "ready", "autopr/ready-branch", "", "", "")
+	keepApproved := createTestJobWithState(t, ctx, store, "approved-branch", "approved", "autopr/approved-branch", "", "", "")
+	_ = createTestJobWithState(t, ctx, store, "ready-no-branch", "ready", "", "", "", "")
+	_ = createTestJobWithState(t, ctx, store, "ready-has-pr", "ready", "autopr/ready-has-pr", "https://github.com/org/repo/pull/1", "", "")
+	_ = createTestJobWithState(t, ctx, store, "approved-merged", "approved", "autopr/approved-merged", "", "2026-02-18T00:00:00Z", "")
+	_ = createTestJobWithState(t, ctx, store, "approved-closed", "approved", "autopr/approved-closed", "", "", "2026-02-18T00:00:00Z")
+	_ = createTestJobWithState(t, ctx, store, "failed-branch", "failed", "autopr/failed-branch", "", "", "")
+
+	got, err := store.ListReadyOrApprovedJobsWithBranchNoPR(ctx)
+	if err != nil {
+		t.Fatalf("list fallback jobs: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 fallback jobs, got %d", len(got))
+	}
+	ids := map[string]bool{
+		got[0].ID: true,
+		got[1].ID: true,
+	}
+	if !ids[keepReady] || !ids[keepApproved] {
+		t.Fatalf("unexpected fallback jobs: %+v", []string{got[0].ID, got[1].ID})
+	}
+}
+
+func TestEnsureJobApproved(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	readyJob := createTestJobWithState(t, ctx, store, "ensure-ready", "ready", "autopr/ensure-ready", "", "", "")
+	if err := store.EnsureJobApproved(ctx, readyJob); err != nil {
+		t.Fatalf("ensure approved from ready: %v", err)
+	}
+	job, err := store.GetJob(ctx, readyJob)
+	if err != nil {
+		t.Fatalf("get ready job: %v", err)
+	}
+	if job.State != "approved" {
+		t.Fatalf("expected ready job to become approved, got %q", job.State)
+	}
+
+	// Idempotent on already approved jobs.
+	if err := store.EnsureJobApproved(ctx, readyJob); err != nil {
+		t.Fatalf("ensure approved idempotent: %v", err)
+	}
+
+	failedJob := createTestJobWithState(t, ctx, store, "ensure-failed", "failed", "autopr/ensure-failed", "", "", "")
+	if err := store.EnsureJobApproved(ctx, failedJob); err != nil {
+		t.Fatalf("ensure approved failed job: %v", err)
+	}
+	job, err = store.GetJob(ctx, failedJob)
+	if err != nil {
+		t.Fatalf("get failed job: %v", err)
+	}
+	if job.State != "failed" {
+		t.Fatalf("expected failed job unchanged, got %q", job.State)
+	}
+}
+
+func createTestJobWithState(t *testing.T, ctx context.Context, store *Store, sourceIssueID, state, branch, prURL, mergedAt, closedAt string) string {
+	t.Helper()
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: sourceIssueID,
+		Title:         sourceIssueID,
+		URL:           "https://github.com/org/repo/issues/" + sourceIssueID,
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue %s: %v", sourceIssueID, err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job %s: %v", sourceIssueID, err)
+	}
+	if _, err := store.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET state = ?, branch_name = ?, pr_url = ?, pr_merged_at = ?, pr_closed_at = ?,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ?`, state, branch, prURL, mergedAt, closedAt, jobID); err != nil {
+		t.Fatalf("configure job %s: %v", sourceIssueID, err)
+	}
+	return jobID
+}
