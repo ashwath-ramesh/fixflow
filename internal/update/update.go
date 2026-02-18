@@ -23,6 +23,9 @@ const (
 	latestReleaseURL = "https://api.github.com/repos/ashwath-ramesh/autopr/releases/latest"
 	binaryName       = "ap"
 
+	defaultReleaseRequestTimeout = 4 * time.Second
+	defaultAssetDownloadTimeout  = 2 * time.Minute
+
 	DefaultCheckTTL = 24 * time.Hour
 )
 
@@ -76,7 +79,7 @@ func NewManager(currentVersion string) *Manager {
 		statePath = ""
 	}
 	return &Manager{
-		Client: &http.Client{Timeout: 4 * time.Second},
+		Client: &http.Client{},
 		Now:    time.Now,
 		OS:     runtime.GOOS,
 		Arch:   runtime.GOARCH,
@@ -244,6 +247,9 @@ func (m *Manager) IsCacheFresh(entry VersionCheckCache, ttl time.Duration) bool 
 }
 
 func (m *Manager) fetchLatestRelease(ctx context.Context) (githubRelease, error) {
+	ctx, cancel := withTimeout(ctx, defaultReleaseRequestTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.ReleaseAPI, nil)
 	if err != nil {
 		return githubRelease{}, fmt.Errorf("build release request: %w", err)
@@ -256,7 +262,7 @@ func (m *Manager) fetchLatestRelease(ctx context.Context) (githubRelease, error)
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	resp, err := m.Client.Do(req)
+	resp, err := m.httpClient().Do(req)
 	if err != nil {
 		return githubRelease{}, fmt.Errorf("fetch latest release: %w", err)
 	}
@@ -338,6 +344,9 @@ func expectedAssetNames(tag, osName, arch string) []string {
 }
 
 func (m *Manager) downloadAndExtractBinary(ctx context.Context, assetURL string) ([]byte, os.FileMode, error) {
+	ctx, cancel := withTimeout(ctx, defaultAssetDownloadTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("build download request: %w", err)
@@ -346,7 +355,7 @@ func (m *Manager) downloadAndExtractBinary(ctx context.Context, assetURL string)
 		req.Header.Set("User-Agent", m.UserAgent)
 	}
 
-	resp, err := m.Client.Do(req)
+	resp, err := m.httpClient().Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("download release asset: %w", err)
 	}
@@ -495,4 +504,23 @@ func compareSemver(a, b semVersion) int {
 		return 1
 	}
 	return 0
+}
+
+func (m *Manager) httpClient() *http.Client {
+	if m.Client != nil {
+		return m.Client
+	}
+	return &http.Client{}
+}
+
+func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Until(deadline) <= timeout {
+			return ctx, func() {}
+		}
+	}
+	return context.WithTimeout(ctx, timeout)
 }

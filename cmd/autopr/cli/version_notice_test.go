@@ -49,33 +49,6 @@ func (m mockStartVersionChecker) MarkCheckAttempt(latestTag string) error {
 	return m.markAttemptFn(latestTag)
 }
 
-type signalBuffer struct {
-	buf   bytes.Buffer
-	mu    sync.Mutex
-	wrote chan struct{}
-}
-
-func newSignalBuffer() *signalBuffer {
-	return &signalBuffer{wrote: make(chan struct{}, 8)}
-}
-
-func (b *signalBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	n, err := b.buf.Write(p)
-	select {
-	case b.wrote <- struct{}{}:
-	default:
-	}
-	return n, err
-}
-
-func (b *signalBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 func TestMaybePrintUpgradeNoticeShowsCachedUpdate(t *testing.T) {
 	var out bytes.Buffer
 	checker := mockStartVersionChecker{
@@ -101,33 +74,21 @@ func TestMaybePrintUpgradeNoticeStaleCachePrintsRefreshedUpdate(t *testing.T) {
 	startUpdateRefreshTimeout = 250 * time.Millisecond
 	defer func() { startUpdateRefreshTimeout = prevTimeout }()
 
-	refreshCalled := make(chan struct{}, 1)
-	out := newSignalBuffer()
+	var refreshCalls atomic.Int32
+	var out bytes.Buffer
 	checker := mockStartVersionChecker{
 		readCacheFn: func() (update.VersionCheckCache, error) {
 			return update.VersionCheckCache{}, os.ErrNotExist
 		},
 		refreshCacheFn: func(context.Context) (update.VersionCheckCache, error) {
-			refreshCalled <- struct{}{}
+			refreshCalls.Add(1)
 			return update.VersionCheckCache{CheckedAt: time.Now(), LatestTag: "v0.3.0"}, nil
 		},
 	}
 
-	started := time.Now()
-	maybePrintUpgradeNotice("v0.2.0", out, checker)
-	if elapsed := time.Since(started); elapsed > 30*time.Millisecond {
-		t.Fatalf("expected non-blocking call, took %v", elapsed)
-	}
-
-	select {
-	case <-refreshCalled:
-	case <-time.After(1 * time.Second):
-		t.Fatal("expected refresh to run asynchronously")
-	}
-	select {
-	case <-out.wrote:
-	case <-time.After(1 * time.Second):
-		t.Fatal("expected refreshed notice output")
+	maybePrintUpgradeNotice("v0.2.0", &out, checker)
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("expected one refresh call, got %d", got)
 	}
 
 	got := out.String()
@@ -187,7 +148,6 @@ func TestMaybePrintUpgradeNoticeFreshCacheSkipsRefresh(t *testing.T) {
 	}
 
 	maybePrintUpgradeNotice("v0.2.0", &bytes.Buffer{}, checker)
-	time.Sleep(50 * time.Millisecond)
 	if refreshCalls.Load() != 0 {
 		t.Fatalf("expected no refresh for fresh cache, got %d", refreshCalls.Load())
 	}
@@ -236,9 +196,39 @@ func TestMaybePrintUpgradeNoticeFailedRefreshThrottlesForTTL(t *testing.T) {
 		t.Fatal("expected first failed refresh to mark cache")
 	}
 	maybePrintUpgradeNotice("v0.2.0", &bytes.Buffer{}, checker)
-	time.Sleep(50 * time.Millisecond)
 
 	if got := refreshCalls.Load(); got != 1 {
 		t.Fatalf("expected one refresh attempt within TTL, got %d", got)
+	}
+}
+
+func TestMaybePrintUpgradeNoticeRefreshTimeoutIsBounded(t *testing.T) {
+	prevTimeout := startUpdateRefreshTimeout
+	startUpdateRefreshTimeout = 60 * time.Millisecond
+	defer func() { startUpdateRefreshTimeout = prevTimeout }()
+
+	var marked atomic.Bool
+	checker := mockStartVersionChecker{
+		readCacheFn: func() (update.VersionCheckCache, error) {
+			return update.VersionCheckCache{}, os.ErrNotExist
+		},
+		refreshCacheFn: func(ctx context.Context) (update.VersionCheckCache, error) {
+			<-ctx.Done()
+			return update.VersionCheckCache{}, ctx.Err()
+		},
+		markAttemptFn: func(string) error {
+			marked.Store(true)
+			return nil
+		},
+	}
+
+	started := time.Now()
+	maybePrintUpgradeNotice("v0.2.0", &bytes.Buffer{}, checker)
+	elapsed := time.Since(started)
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("expected bounded refresh time, took %v", elapsed)
+	}
+	if !marked.Load() {
+		t.Fatal("expected timeout refresh to mark check attempt")
 	}
 }

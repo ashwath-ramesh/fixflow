@@ -9,7 +9,7 @@ import (
 	"autopr/internal/update"
 )
 
-var startUpdateRefreshTimeout = 3 * time.Second
+var startUpdateRefreshTimeout = 400 * time.Millisecond
 
 type startVersionChecker interface {
 	ReadCache() (update.VersionCheckCache, error)
@@ -32,18 +32,16 @@ func maybePrintUpgradeNotice(currentVersion string, out io.Writer, checker start
 		return
 	}
 
-	go func(alreadyPrinted bool, fallbackLatestTag string) {
-		ctx, cancel := context.WithTimeout(context.Background(), startUpdateRefreshTimeout)
-		defer cancel()
-		refreshed, err := checker.RefreshCache(ctx)
-		if err != nil {
-			_ = checker.MarkCheckAttempt(fallbackLatestTag)
-			return
-		}
-		if !alreadyPrinted {
-			_ = printUpgradeNotice(currentVersion, refreshed.LatestTag, out)
-		}
-	}(printed, fallbackTag)
+	ctx, cancel := context.WithTimeout(context.Background(), startUpdateRefreshTimeout)
+	defer cancel()
+	refreshed, err := checker.RefreshCache(ctx)
+	if err != nil {
+		_ = checker.MarkCheckAttempt(fallbackTag)
+		return
+	}
+	if !printed {
+		_ = printUpgradeNotice(currentVersion, refreshed.LatestTag, out)
+	}
 }
 
 func printUpgradeNotice(currentVersion, latestTag string, out io.Writer) bool {

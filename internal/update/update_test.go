@@ -146,6 +146,43 @@ func TestFetchLatestRelease(t *testing.T) {
 	}
 }
 
+func TestFetchLatestReleaseUsesRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now()
+	var reqDeadline time.Time
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			deadline, ok := r.Context().Deadline()
+			if !ok {
+				t.Fatal("expected request deadline")
+			}
+			reqDeadline = deadline
+			return jsonResponse(http.StatusOK, `{"tag_name":"v0.9.1","assets":[]}`), nil
+		}),
+	}
+
+	mgr := &Manager{
+		Client:     client,
+		Now:        time.Now,
+		ReleaseAPI: "https://api.github.com/repos/ashwath-ramesh/autopr/releases/latest",
+		UserAgent:  "autopr/test",
+	}
+
+	if _, err := mgr.fetchLatestRelease(context.Background()); err != nil {
+		t.Fatalf("fetch latest release: %v", err)
+	}
+	if reqDeadline.IsZero() {
+		t.Fatal("expected captured request deadline")
+	}
+	if !reqDeadline.After(start.Add(2 * time.Second)) {
+		t.Fatalf("release deadline too short: %v", reqDeadline.Sub(start))
+	}
+	if reqDeadline.After(start.Add(defaultReleaseRequestTimeout + 500*time.Millisecond)) {
+		t.Fatalf("release deadline too long: %v", reqDeadline.Sub(start))
+	}
+}
+
 func TestCacheReadWriteAndFreshness(t *testing.T) {
 	t.Parallel()
 
@@ -267,6 +304,49 @@ func TestUpgradeDownloadsAndReplacesBinary(t *testing.T) {
 	}
 	if string(got) != "new-binary" {
 		t.Fatalf("unexpected executable content: %q", string(got))
+	}
+}
+
+func TestDownloadAndExtractBinaryUsesLongerRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	archive := mustMakeTarGz(t, "ap", []byte("new-binary"), 0o755)
+	start := time.Now()
+	var reqDeadline time.Time
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			deadline, ok := r.Context().Deadline()
+			if !ok {
+				t.Fatal("expected request deadline")
+			}
+			reqDeadline = deadline
+			return binaryResponse(http.StatusOK, archive), nil
+		}),
+	}
+
+	mgr := &Manager{
+		Client: client,
+		Now:    time.Now,
+	}
+
+	got, mode, err := mgr.downloadAndExtractBinary(context.Background(), "https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz")
+	if err != nil {
+		t.Fatalf("download and extract binary: %v", err)
+	}
+	if string(got) != "new-binary" {
+		t.Fatalf("unexpected binary payload: %q", string(got))
+	}
+	if mode&0o111 == 0 {
+		t.Fatalf("expected executable mode, got %o", mode)
+	}
+	if reqDeadline.IsZero() {
+		t.Fatal("expected captured request deadline")
+	}
+	if !reqDeadline.After(start.Add(30 * time.Second)) {
+		t.Fatalf("download deadline too short: %v", reqDeadline.Sub(start))
+	}
+	if reqDeadline.After(start.Add(defaultAssetDownloadTimeout + 2*time.Second)) {
+		t.Fatalf("download deadline too long: %v", reqDeadline.Sub(start))
 	}
 }
 
