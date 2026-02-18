@@ -242,6 +242,82 @@ func TestRecoverInFlightJobs(t *testing.T) {
 	}
 }
 
+func TestRecoverRunningSessionsMarksFailed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ffid, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "4",
+		Title:         "session recovery test",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runningID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex")
+	if err != nil {
+		t.Fatalf("create running session: %v", err)
+	}
+
+	completedID, err := store.CreateSession(ctx, jobID, "implement", 0, "codex")
+	if err != nil {
+		t.Fatalf("create completed session: %v", err)
+	}
+	if err := store.CompleteSession(ctx, completedID, "completed", "ok", "prompt", "", "", "", "", 5, 7, 12); err != nil {
+		t.Fatalf("complete completed session: %v", err)
+	}
+
+	n, err := store.RecoverRunningSessions(ctx)
+	if err != nil {
+		t.Fatalf("recover running sessions: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 recovered session, got %d", n)
+	}
+
+	recovered, err := store.GetFullSession(ctx, int(runningID))
+	if err != nil {
+		t.Fatalf("get recovered session: %v", err)
+	}
+	if recovered.Status != "failed" {
+		t.Fatalf("expected recovered status failed, got %q", recovered.Status)
+	}
+	if recovered.ErrorMessage != recoveredSessionErrorMessage {
+		t.Fatalf("unexpected recovered error message: %q", recovered.ErrorMessage)
+	}
+	if recovered.CompletedAt == "" {
+		t.Fatalf("expected recovered completed_at to be set")
+	}
+	if recovered.InputTokens != 0 || recovered.OutputTokens != 0 || recovered.DurationMS != 0 {
+		t.Fatalf("expected recovered metrics to default to 0, got %d/%d/%d", recovered.InputTokens, recovered.OutputTokens, recovered.DurationMS)
+	}
+
+	completed, err := store.GetFullSession(ctx, int(completedID))
+	if err != nil {
+		t.Fatalf("get completed session: %v", err)
+	}
+	if completed.Status != "completed" {
+		t.Fatalf("expected completed status unchanged, got %q", completed.Status)
+	}
+	if completed.ErrorMessage != "" {
+		t.Fatalf("expected completed error unchanged, got %q", completed.ErrorMessage)
+	}
+}
+
 func TestIssueEligibilityRoundTrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

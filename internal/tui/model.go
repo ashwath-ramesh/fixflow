@@ -177,11 +177,34 @@ func (m Model) fetchSessions() tea.Msg {
 	if err != nil {
 		return errMsg(err)
 	}
+	activeStep := db.StepForState(m.selected.State)
+	sessions = filterGhostSessions(sessions, activeStep)
 	msg := sessionsMsg{jobID: jobID, sessions: sessions}
 	if art, err := m.store.GetLatestArtifact(context.Background(), jobID, "test_output"); err == nil {
 		msg.testArtifact = &art
 	}
 	return msg
+}
+
+func filterGhostSessions(sessions []db.LLMSessionSummary, activeStep string) []db.LLMSessionSummary {
+	out := make([]db.LLMSessionSummary, 0, len(sessions))
+	for _, sess := range sessions {
+		if shouldHideGhostSession(sess, activeStep) {
+			continue
+		}
+		out = append(out, sess)
+	}
+	return out
+}
+
+func shouldHideGhostSession(sess db.LLMSessionSummary, activeStep string) bool {
+	if sess.Status != "running" {
+		return false
+	}
+	if sess.InputTokens != 0 || sess.OutputTokens != 0 || sess.DurationMS != 0 {
+		return false
+	}
+	return activeStep == "" || sess.Step != activeStep
 }
 
 func (m Model) fetchFullSession() tea.Msg {

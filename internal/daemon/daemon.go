@@ -51,6 +51,13 @@ func Run(cfg *config.Config, foreground bool) error {
 	if recovered > 0 {
 		slog.Info("recovered in-flight jobs", "count", recovered)
 	}
+	recoveredSessions, err := store.RecoverRunningSessions(context.Background())
+	if err != nil {
+		return fmt.Errorf("recover running sessions: %w", err)
+	}
+	if recoveredSessions > 0 {
+		slog.Info("recovered stale llm sessions", "count", recoveredSessions)
+	}
 
 	// Signal context.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -150,4 +157,3 @@ func Run(cfg *config.Config, foreground bool) error {
 
 	return nil
 }
-

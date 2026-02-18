@@ -220,29 +220,49 @@ func (r *Runner) invokeProvider(ctx context.Context, jobID, step string, iterati
 		return llm.Response{}, fmt.Errorf("create session: %w", err)
 	}
 
-	resp, runErr := r.provider.Run(ctx, workDir, prompt)
+	var resp llm.Response
+	defer func() {
+		status := "completed"
+		errMsg := ""
+		panicVal := recover()
 
-	status := "completed"
-	errMsg := ""
-	if runErr != nil {
-		if r.isJobCancelledError(ctx, jobID, runErr) {
-			status = "cancelled"
-			errMsg = "cancelled"
-		} else {
+		if panicVal != nil {
 			status = "failed"
-			errMsg = runErr.Error()
+			errMsg = fmt.Sprintf("session interrupted: panic: %v", panicVal)
+		} else if err != nil {
+			if r.isJobCancelledError(ctx, jobID, err) {
+				status = "cancelled"
+				errMsg = "cancelled"
+			} else {
+				status = "failed"
+				errMsg = sessionErrorMessage(err)
+			}
 		}
-	}
 
-	_ = r.store.CompleteSession(ctx, sessionID, status, resp.Text, prompt, "", resp.JSONLPath, resp.CommitSHA, errMsg, resp.InputTokens, resp.OutputTokens, resp.DurationMS)
-
-	if runErr != nil {
-		if status == "cancelled" {
-			return resp, errJobCancelled
+		completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if completeErr := r.store.CompleteSession(completeCtx, sessionID, status, resp.Text, prompt, "", resp.JSONLPath, resp.CommitSHA, errMsg, resp.InputTokens, resp.OutputTokens, resp.DurationMS); completeErr != nil {
+			slog.Warn("failed to complete llm session", "job", jobID, "session_id", sessionID, "status", status, "err", completeErr)
 		}
-		return resp, runErr
+
+		if panicVal != nil {
+			panic(panicVal)
+		}
+	}()
+
+	resp, err = r.provider.Run(ctx, workDir, prompt)
+	return resp, err
+}
+
+func sessionErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "session interrupted: context canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "session interrupted: context deadline exceeded"
+	default:
+		return err.Error()
 	}
-	return resp, nil
 }
 
 func (r *Runner) watchForJobCancellation(ctx context.Context, jobID string, cancel context.CancelFunc) {

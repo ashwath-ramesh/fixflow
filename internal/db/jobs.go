@@ -539,6 +539,8 @@ type LLMSession struct {
 	CompletedAt  string
 }
 
+const recoveredSessionErrorMessage = "session recovered on daemon startup: previous run interrupted"
+
 func (s *Store) CreateSession(ctx context.Context, jobID, step string, iteration int, provider string) (int64, error) {
 	const q = `INSERT INTO llm_sessions(job_id, step, iteration, llm_provider) VALUES(?,?,?,?)`
 	res, err := s.Writer.ExecContext(ctx, q, jobID, step, iteration, provider)
@@ -561,6 +563,26 @@ WHERE id = ? AND status = 'running'`,
 	// Session may already be terminal (e.g. cancelled by user). Treat as no-op.
 	_, _ = res.RowsAffected()
 	return nil
+}
+
+// RecoverRunningSessions marks any stale running LLM sessions as failed.
+// Called on daemon startup after a crash/interruption.
+func (s *Store) RecoverRunningSessions(ctx context.Context) (int64, error) {
+	res, err := s.Writer.ExecContext(ctx, `
+UPDATE llm_sessions
+SET status = 'failed',
+    error_message = COALESCE(NULLIF(error_message, ''), ?),
+    input_tokens = COALESCE(input_tokens, 0),
+    output_tokens = COALESCE(output_tokens, 0),
+    duration_ms = COALESCE(duration_ms, 0),
+    completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+WHERE status = 'running'`,
+		recoveredSessionErrorMessage,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover running sessions: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ListSessionsByJob(ctx context.Context, jobID string) ([]LLMSession, error) {

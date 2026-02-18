@@ -13,6 +13,44 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestFilterGhostSessions(t *testing.T) {
+	sessions := []db.LLMSessionSummary{
+		{ID: 1, Step: "plan", Status: "running", InputTokens: 0, OutputTokens: 0, DurationMS: 0},
+		{ID: 2, Step: "plan", Status: "completed", InputTokens: 12, OutputTokens: 8, DurationMS: 1200},
+		{ID: 3, Step: "implement", Status: "running", InputTokens: 0, OutputTokens: 0, DurationMS: 0},
+		{ID: 4, Step: "code_review", Status: "running", InputTokens: 5, OutputTokens: 2, DurationMS: 800},
+	}
+
+	filtered := filterGhostSessions(sessions, "implement")
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 sessions after filtering, got %d", len(filtered))
+	}
+	if filtered[0].ID != 2 {
+		t.Fatalf("expected completed session id=2 first, got id=%d", filtered[0].ID)
+	}
+	if filtered[1].ID != 3 {
+		t.Fatalf("expected active running session id=3 to be kept, got id=%d", filtered[1].ID)
+	}
+	if filtered[2].ID != 4 {
+		t.Fatalf("expected non-ghost running session id=4 to be kept, got id=%d", filtered[2].ID)
+	}
+}
+
+func TestShouldHideGhostSession(t *testing.T) {
+	ghost := db.LLMSessionSummary{Step: "plan", Status: "running", InputTokens: 0, OutputTokens: 0, DurationMS: 0}
+	if !shouldHideGhostSession(ghost, "") {
+		t.Fatalf("expected ghost session to be hidden when no active step")
+	}
+	if shouldHideGhostSession(ghost, "plan") {
+		t.Fatalf("expected active running session to be visible")
+	}
+
+	nonGhost := db.LLMSessionSummary{Step: "plan", Status: "running", InputTokens: 1, OutputTokens: 0, DurationMS: 0}
+	if shouldHideGhostSession(nonGhost, "") {
+		t.Fatalf("did not expect non-ghost running session to be hidden")
+	}
+}
+
 func TestListViewCancelPromptAndFooter(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
