@@ -143,10 +143,16 @@ type actionResultMsg struct {
 type tickMsg struct{}
 type errMsg error
 
+const autoRefreshInterval = 5 * time.Second
+
 func tick() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+	return tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg {
 		return tickMsg{}
 	})
+}
+
+func (m Model) autoRefreshPaused() bool {
+	return m.showDiff || m.selectedSession != nil
 }
 
 // ── Init / Commands ─────────────────────────────────────────────────────────
@@ -419,13 +425,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	case tickMsg:
 		m.daemonRunning = isDaemonRunning(m.cfg.Daemon.PIDFile)
-		cmds := []tea.Cmd{m.fetchJobs, m.fetchIssueSummary, tick()}
-		if m.selected != nil && !m.showDiff && m.selectedSession == nil {
+		cmds := []tea.Cmd{tick()}
+		if m.autoRefreshPaused() {
+			return m, tea.Batch(cmds...)
+		}
+		cmds = append(cmds, m.fetchJobs, m.fetchIssueSummary)
+		if m.selected != nil {
 			cmds = append(cmds, m.fetchSessions)
 		}
 		return m, tea.Batch(cmds...)
 	case jobsMsg:
 		m.jobs = msg
+		if len(m.jobs) == 0 {
+			m.cursor = 0
+		} else if m.cursor >= len(m.jobs) {
+			m.cursor = len(m.jobs) - 1
+		}
 		m.err = nil
 		// Re-sync selected pointer to new slice so keybindings see fresh state.
 		if m.selected != nil {

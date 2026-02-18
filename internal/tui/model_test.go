@@ -272,18 +272,122 @@ func keyRunes(r rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
 }
 
-func TestTickMsgTriggersJobRefresh(t *testing.T) {
+func batchCmdCount(t *testing.T, cmd tea.Cmd) int {
+	t.Helper()
+	if cmd == nil {
+		return 0
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return 1
+	}
+	return len(batch)
+}
+
+func TestTickMsgInListViewSchedulesRefresh(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 
 	m, store, _ := newTestModelWithQueuedJob(t, tmp)
 	defer store.Close()
 
-	modelAny, cmd := m.Update(tickMsg{})
-	m = modelAny.(Model)
+	_, cmd := m.Update(tickMsg{})
+	if got, want := batchCmdCount(t, cmd), 3; got != want {
+		t.Fatalf("expected %d tick batch commands in list view, got %d", want, got)
+	}
+}
 
-	if cmd == nil {
-		t.Fatalf("expected tick to return a batch command")
+func TestTickMsgInDetailViewSchedulesJobsSessionsRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+
+	_, cmd := m.Update(tickMsg{})
+	if got, want := batchCmdCount(t, cmd), 4; got != want {
+		t.Fatalf("expected %d tick batch commands in detail view, got %d", want, got)
+	}
+}
+
+func TestTickMsgInSessionDetailPausesAutoRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+	m.selectedSession = &db.LLMSession{}
+
+	_, cmd := m.Update(tickMsg{})
+	if got, want := batchCmdCount(t, cmd), 1; got != want {
+		t.Fatalf("expected %d tick batch command while paused in session detail, got %d", want, got)
+	}
+}
+
+func TestTickMsgInDiffViewPausesAutoRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+	m.showDiff = true
+
+	_, cmd := m.Update(tickMsg{})
+	if got, want := batchCmdCount(t, cmd), 1; got != want {
+		t.Fatalf("expected %d tick batch command while paused in diff view, got %d", want, got)
+	}
+}
+
+func TestManualRefreshInListViewStillWorks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	_, cmd := m.handleKey(keyRunes('r'))
+	if got, want := batchCmdCount(t, cmd), 2; got != want {
+		t.Fatalf("expected %d refresh commands in list view, got %d", want, got)
+	}
+}
+
+func TestManualRefreshInDetailViewStillWorks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+
+	_, cmd := m.handleKey(keyRunes('r'))
+	if got, want := batchCmdCount(t, cmd), 3; got != want {
+		t.Fatalf("expected %d refresh commands in detail view, got %d", want, got)
+	}
+}
+
+func TestJobsMsgClampsCursorWhenListShrinks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	m.cursor = 5
+	modelAny, _ := m.Update(jobsMsg([]db.Job{{ID: "ap-job-one"}}))
+	m = modelAny.(Model)
+	if m.cursor != 0 {
+		t.Fatalf("expected cursor to clamp to 0, got %d", m.cursor)
+	}
+
+	m.cursor = 2
+	modelAny, _ = m.Update(jobsMsg(nil))
+	m = modelAny.(Model)
+	if m.cursor != 0 {
+		t.Fatalf("expected cursor to reset to 0 for empty jobs list, got %d", m.cursor)
 	}
 }
 

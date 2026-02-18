@@ -238,6 +238,9 @@ git diff of changes.
 **Level 3 — Session Detail:** Full LLM output rendered as styled markdown with syntax-highlighted
 code blocks (via glamour). Press `tab` to toggle between the input prompt and output response.
 
+Auto-refresh runs every 5 seconds in job list and job detail views. Auto-refresh pauses in
+session detail and diff views to avoid content jumping.
+
 | Key | Action |
 |-----|--------|
 | `j/k` | Navigate up/down |
@@ -247,7 +250,7 @@ code blocks (via glamour). Press `tab` to toggle between the input prompt and ou
 | `d` | View git diff (job detail) |
 | `c` | Cancel selected/current job (list/detail) |
 | `u/d` | Half-page scroll (session/diff view) |
-| `r` | Refresh data |
+| `r` | Refresh immediately |
 | `q` | Quit |
 
 ## Job States
