@@ -78,7 +78,18 @@ func CreateGitHubPR(ctx context.Context, token, owner, repo, head, base, title, 
 
 // findGitHubPR looks up an existing open PR for the given head branch.
 func findGitHubPR(ctx context.Context, token, owner, repo, head string) (string, error) {
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?head=%s:%s&state=open", owner, repo, owner, head)
+	return FindGitHubPRByBranch(ctx, token, owner, repo, head, "open")
+}
+
+// FindGitHubPRByBranch looks up an existing PR for the given head branch.
+// state should be "open" or "all"; defaults to "open".
+func FindGitHubPRByBranch(ctx context.Context, token, owner, repo, head, state string) (string, error) {
+	if state == "" {
+		state = "open"
+	}
+	headRef := fmt.Sprintf("%s:%s", owner, head)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?head=%s&state=%s",
+		owner, repo, url.QueryEscape(headRef), url.QueryEscape(state))
 
 	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
@@ -113,9 +124,7 @@ func findGitHubPR(ctx context.Context, token, owner, repo, head string) (string,
 
 // CreateGitLabMR creates a merge request on GitLab and returns its web URL.
 func CreateGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch, targetBranch, title, description string) (string, error) {
-	if baseURL == "" {
-		baseURL = "https://gitlab.com"
-	}
+	baseURL = normalizeGitLabBaseURL(baseURL)
 
 	payload := map[string]any{
 		"source_branch": sourceBranch,
@@ -177,8 +186,21 @@ func CreateGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch
 
 // findGitLabMR looks up an existing open MR for the given source branch.
 func findGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch string) (string, error) {
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?source_branch=%s&state=opened",
-		baseURL, projectID, url.QueryEscape(sourceBranch))
+	return FindGitLabMRByBranch(ctx, token, baseURL, projectID, sourceBranch, "opened")
+}
+
+// FindGitLabMRByBranch looks up an existing MR for the given source branch.
+// state should be "opened" (or "open") or "all"; defaults to "opened".
+func FindGitLabMRByBranch(ctx context.Context, token, baseURL, projectID, sourceBranch, state string) (string, error) {
+	baseURL = normalizeGitLabBaseURL(baseURL)
+	if state == "" {
+		state = "opened"
+	}
+	if state == "open" {
+		state = "opened"
+	}
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?source_branch=%s&state=%s",
+		baseURL, projectID, url.QueryEscape(sourceBranch), url.QueryEscape(state))
 
 	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
@@ -281,9 +303,7 @@ var gitlabMRNumberRe = regexp.MustCompile(`/merge_requests/(\d+)`)
 // CheckGitLabMRStatus checks whether a GitLab MR has been merged or closed.
 // mrURL should be like "https://gitlab.com/org/repo/-/merge_requests/123".
 func CheckGitLabMRStatus(ctx context.Context, token, baseURL, mrURL string) (PRMergeStatus, error) {
-	if baseURL == "" {
-		baseURL = "https://gitlab.com"
-	}
+	baseURL = normalizeGitLabBaseURL(baseURL)
 
 	matches := gitlabMRNumberRe.FindStringSubmatch(mrURL)
 	if len(matches) < 2 {
@@ -335,4 +355,12 @@ func CheckGitLabMRStatus(ctx context.Context, token, baseURL, mrURL string) (PRM
 		status.ClosedAt = mr.ClosedAt
 	}
 	return status, nil
+}
+
+func normalizeGitLabBaseURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "https://gitlab.com"
+	}
+	return strings.TrimRight(baseURL, "/")
 }
