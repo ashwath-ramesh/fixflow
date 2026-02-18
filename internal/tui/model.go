@@ -302,7 +302,7 @@ func (m Model) executeApprove() tea.Msg {
 	}
 
 	// Push branch to remote before creating PR.
-	if err := git.PushBranch(ctx, job.WorktreePath, job.BranchName); err != nil {
+	if err := git.PushBranchCaptured(ctx, job.WorktreePath, job.BranchName); err != nil {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("push branch: %w", err)}
 	}
 
@@ -507,9 +507,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionErr = msg.err
 			m.actionWarn = ""
 		} else {
-			// Action succeeded — refresh job list and go back to Level 1.
+			// Action succeeded — refresh and keep detail view for approve.
 			m.actionErr = nil
 			m.actionWarn = msg.warn
+			if msg.action == "approve" && m.selected != nil {
+				return m, tea.Batch(m.fetchJobs, m.fetchSessions, m.fetchIssueSummary)
+			}
+			// Other actions keep existing behavior: return to Level 1.
 			m.selected = nil
 			m.sessions = nil
 			m.testArtifact = nil

@@ -285,6 +285,40 @@ func batchCmdCount(t *testing.T, cmd tea.Cmd) int {
 	return len(batch)
 }
 
+func batchHasMessageType(t *testing.T, cmd tea.Cmd, want string) bool {
+	t.Helper()
+	if cmd == nil {
+		return false
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return batchMsgType(msg) == want
+	}
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if batchMsgType(c()) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func batchMsgType(msg tea.Msg) string {
+	switch msg.(type) {
+	case jobsMsg:
+		return "jobs"
+	case sessionsMsg:
+		return "sessions"
+	case issueSummaryMsg:
+		return "summary"
+	default:
+		return ""
+	}
+}
+
 func TestTickMsgInListViewSchedulesRefresh(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -421,6 +455,75 @@ func TestSelectedSyncsAfterJobsMsg(t *testing.T) {
 	}
 	if m.selected.State != "reviewing" {
 		t.Fatalf("expected selected state to be reviewing, got %q", m.selected.State)
+	}
+}
+
+func TestApproveSuccessKeepsDetailViewAndRefreshesJobsSessionsSummary(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+	m.confirmAction = "approve"
+	m.confirmJobID = m.selected.ID
+
+	modelAny, cmd := m.Update(actionResultMsg{action: "approve"})
+	m = modelAny.(Model)
+
+	if m.confirmAction != "" || m.confirmJobID != "" {
+		t.Fatalf("expected confirmation state cleared after approve success")
+	}
+	if m.selected == nil {
+		t.Fatalf("expected selected job to stay open on approve success")
+	}
+	if got, want := batchCmdCount(t, cmd), 3; got != want {
+		t.Fatalf("expected %d refresh commands for approve success, got %d", want, got)
+	}
+	if !batchHasMessageType(t, cmd, "jobs") {
+		t.Fatalf("expected approve success refresh to include jobs fetch")
+	}
+	if !batchHasMessageType(t, cmd, "sessions") {
+		t.Fatalf("expected approve success refresh to include sessions fetch")
+	}
+	if !batchHasMessageType(t, cmd, "summary") {
+		t.Fatalf("expected approve success refresh to include issue summary fetch")
+	}
+
+	updated := make([]db.Job, len(m.jobs))
+	copy(updated, m.jobs)
+	updated[0].State = "approved"
+	modelAny, _ = m.Update(jobsMsg(updated))
+	m = modelAny.(Model)
+	if m.selected == nil || m.selected.State != "approved" {
+		t.Fatalf("expected selected state to update to approved after jobs refresh")
+	}
+}
+
+func TestNonApproveSuccessKeepsExistingNavigationReset(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+	m.confirmAction = "cancel"
+	m.confirmJobID = m.selected.ID
+
+	modelAny, cmd := m.Update(actionResultMsg{action: "cancel"})
+	m = modelAny.(Model)
+
+	if m.confirmAction != "" || m.confirmJobID != "" {
+		t.Fatalf("expected confirmation state cleared after cancel success")
+	}
+	if m.selected != nil {
+		t.Fatalf("expected selected to reset for non-approve success")
+	}
+	if got, want := batchCmdCount(t, cmd), 2; got != want {
+		t.Fatalf("expected %d refresh commands for non-approve success, got %d", want, got)
+	}
+	if batchHasMessageType(t, cmd, "sessions") {
+		t.Fatalf("did not expect sessions refresh for non-approve success")
 	}
 }
 

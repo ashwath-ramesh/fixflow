@@ -73,6 +73,12 @@ func PushBranch(ctx context.Context, dir, branchName string) error {
 	return runGit(ctx, dir, "push", "origin", branchName)
 }
 
+// PushBranchCaptured pushes a branch to origin without writing output to the
+// process stdout/stderr. Any git output is captured and included in errors.
+func PushBranchCaptured(ctx context.Context, dir, branchName string) error {
+	return runGitCaptured(ctx, dir, "push", "origin", branchName)
+}
+
 func injectToken(repoURL, token string) string {
 	if token == "" {
 		return repoURL
@@ -92,6 +98,22 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+func runGitCaptured(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
+		}
 		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
