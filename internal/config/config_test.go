@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -350,6 +351,134 @@ test_cmd = "make test"
 		t.Fatalf("expected error")
 	}
 	if !strings.Contains(err.Error(), "include_labels") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadDefaultsNotificationTriggers(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	want := []string{
+		TriggerAwaitingApproval,
+		TriggerFailed,
+		TriggerPRCreated,
+		TriggerPRMerged,
+	}
+	if !reflect.DeepEqual(cfg.Notifications.Triggers, want) {
+		t.Fatalf("expected default triggers %v, got %v", want, cfg.Notifications.Triggers)
+	}
+}
+
+func TestLoadAllowsExplicitEmptyNotificationTriggers(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[notifications]
+triggers = []
+
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Notifications.Triggers) != 0 {
+		t.Fatalf("expected explicit empty trigger list to remain empty, got %v", cfg.Notifications.Triggers)
+	}
+}
+
+func TestLoadFailsForInvalidNotificationTrigger(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[notifications]
+triggers = ["awaiting_approval", "oops"]
+
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "notifications.triggers") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadFailsForInvalidNotificationURL(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[notifications]
+webhook_url = "ftp://example.com/hook"
+
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "notifications.webhook_url") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

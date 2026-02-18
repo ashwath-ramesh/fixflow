@@ -29,6 +29,13 @@ sync_interval = "5m"
 [llm]
 provider = "claude"  # claude or codex
 
+[notifications]
+# webhook_url = "https://example.com/hook"                     # generic JSON webhook
+# slack_webhook = "https://hooks.slack.com/services/..."       # Slack incoming webhook
+# desktop = true                                                # macOS desktop notifications
+# triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
+# Set triggers = [] to disable all notifications.
+
 # Project definitions — add one [[projects]] block per project.
 [[projects]]
 name = "my-project"

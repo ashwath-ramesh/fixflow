@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,10 +79,11 @@ type Config struct {
 	LogLevel  string `toml:"log_level"`
 	LogFile   string `toml:"log_file"`
 
-	Daemon DaemonConfig `toml:"daemon"`
-	Tokens TokensConfig `toml:"tokens"`
-	Sentry SentryConfig `toml:"sentry"`
-	LLM    LLMConfig    `toml:"llm"`
+	Daemon        DaemonConfig        `toml:"daemon"`
+	Tokens        TokensConfig        `toml:"tokens"`
+	Sentry        SentryConfig        `toml:"sentry"`
+	LLM           LLMConfig           `toml:"llm"`
+	Notifications NotificationsConfig `toml:"notifications"`
 
 	Projects []ProjectConfig `toml:"projects"`
 
@@ -110,6 +113,27 @@ type SentryConfig struct {
 
 type LLMConfig struct {
 	Provider string `toml:"provider"`
+}
+
+type NotificationsConfig struct {
+	WebhookURL   string   `toml:"webhook_url"`
+	SlackWebhook string   `toml:"slack_webhook"`
+	Desktop      bool     `toml:"desktop"`
+	Triggers     []string `toml:"triggers"`
+}
+
+const (
+	TriggerAwaitingApproval = "awaiting_approval"
+	TriggerFailed           = "failed"
+	TriggerPRCreated        = "pr_created"
+	TriggerPRMerged         = "pr_merged"
+)
+
+var defaultNotificationTriggers = []string{
+	TriggerAwaitingApproval,
+	TriggerFailed,
+	TriggerPRCreated,
+	TriggerPRMerged,
 }
 
 type ProjectConfig struct {
@@ -228,6 +252,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.LLM.Provider == "" {
 		cfg.LLM.Provider = "codex"
 	}
+	if cfg.Notifications.Triggers == nil {
+		cfg.Notifications.Triggers = slices.Clone(defaultNotificationTriggers)
+	}
 	for i := range cfg.Projects {
 		if cfg.Projects[i].BaseBranch == "" {
 			cfg.Projects[i].BaseBranch = "main"
@@ -302,6 +329,11 @@ func validate(cfg *Config) error {
 	if _, err := time.ParseDuration(cfg.Daemon.SyncInterval); err != nil {
 		return fmt.Errorf("invalid daemon.sync_interval %q: %w", cfg.Daemon.SyncInterval, err)
 	}
+	normalizedTriggers, err := validateNotificationsConfig(cfg.Notifications)
+	if err != nil {
+		return err
+	}
+	cfg.Notifications.Triggers = normalizedTriggers
 	if len(cfg.Projects) == 0 {
 		return fmt.Errorf("at least one [[projects]] entry is required")
 	}
@@ -327,6 +359,67 @@ func validate(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+func validateNotificationsConfig(cfg NotificationsConfig) ([]string, error) {
+	if cfg.WebhookURL != "" {
+		if err := validateWebhookURL(cfg.WebhookURL); err != nil {
+			return nil, fmt.Errorf("invalid notifications.webhook_url: %w", err)
+		}
+	}
+	if cfg.SlackWebhook != "" {
+		if err := validateWebhookURL(cfg.SlackWebhook); err != nil {
+			return nil, fmt.Errorf("invalid notifications.slack_webhook: %w", err)
+		}
+	}
+	normalized, err := normalizeTriggers(cfg.Triggers)
+	if err != nil {
+		return nil, fmt.Errorf("invalid notifications.triggers: %w", err)
+	}
+	return normalized, nil
+}
+
+func validateWebhookURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("must use http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+	return nil
+}
+
+func normalizeTriggers(triggers []string) ([]string, error) {
+	out := make([]string, 0, len(triggers))
+	seen := make(map[string]struct{}, len(triggers))
+	for i, trigger := range triggers {
+		normalized := strings.ToLower(strings.TrimSpace(trigger))
+		if normalized == "" {
+			return nil, fmt.Errorf("trigger at index %d is empty", i)
+		}
+		if !isValidTrigger(normalized) {
+			return nil, fmt.Errorf("unsupported trigger %q", normalized)
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out, nil
+}
+
+func isValidTrigger(trigger string) bool {
+	switch trigger {
+	case TriggerAwaitingApproval, TriggerFailed, TriggerPRCreated, TriggerPRMerged:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeLabels(labels []string) ([]string, error) {

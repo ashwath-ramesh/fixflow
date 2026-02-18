@@ -182,8 +182,14 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 	if to == "approved" || to == "rejected" || to == "ready" || to == "failed" || to == "cancelled" {
 		extra = ", completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 	}
+	tx, err := s.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("transition job %s %s->%s: %w", jobID, from, to, err)
+	}
+	defer tx.Rollback()
+
 	q := fmt.Sprintf(`UPDATE jobs SET state = ?, updated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', 'now')%s WHERE id = ? AND state = ?`, extra)
-	res, err := s.Writer.ExecContext(ctx, q, to, jobID, from)
+	res, err := tx.ExecContext(ctx, q, to, jobID, from)
 	if err != nil {
 		return fmt.Errorf("transition job %s %s->%s: %w", jobID, from, to, err)
 	}
@@ -191,19 +197,58 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 	if n == 0 {
 		return fmt.Errorf("job %s not in state %s (concurrent modification?)", jobID, from)
 	}
+
+	var eventType string
+	switch to {
+	case "ready":
+		eventType = NotificationEventAwaitingApproval
+	case "failed":
+		eventType = NotificationEventFailed
+	case "approved":
+		var prURL string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(pr_url, '') FROM jobs WHERE id = ?`, jobID).Scan(&prURL); err != nil {
+			return fmt.Errorf("transition job %s %s->%s: load pr_url: %w", jobID, from, to, err)
+		}
+		if strings.TrimSpace(prURL) != "" {
+			eventType = NotificationEventPRCreated
+		}
+	}
+	if err := enqueueNotificationEventTx(ctx, tx, jobID, eventType); err != nil {
+		return fmt.Errorf("transition job %s %s->%s: %w", jobID, from, to, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("transition job %s %s->%s: %w", jobID, from, to, err)
+	}
 	return nil
 }
 
 // EnsureJobApproved transitions a ready job to approved. If the job is already
 // approved (or in another state due to concurrent updates), this is a no-op.
 func (s *Store) EnsureJobApproved(ctx context.Context, jobID string) error {
-	_, err := s.Writer.ExecContext(ctx, `
+	tx, err := s.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("ensure job approved %s: %w", jobID, err)
+	}
+	defer tx.Rollback()
+
+	var prURL string
+	err = tx.QueryRowContext(ctx, `
 UPDATE jobs
 SET state = 'approved',
     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = ? AND state = 'ready'`, jobID)
-	if err != nil {
+WHERE id = ? AND state = 'ready'
+RETURNING COALESCE(pr_url, '')`, jobID).Scan(&prURL)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("ensure job approved %s: %w", jobID, err)
+	}
+	if err == nil && strings.TrimSpace(prURL) != "" {
+		if err := enqueueNotificationEventTx(ctx, tx, jobID, NotificationEventPRCreated); err != nil {
+			return fmt.Errorf("ensure job approved %s: %w", jobID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("ensure job approved %s: %w", jobID, err)
 	}
 	return nil
@@ -441,10 +486,27 @@ WHERE job_id = ? AND status = 'running'`, jobID)
 
 // MarkJobMerged sets pr_merged_at on a job.
 func (s *Store) MarkJobMerged(ctx context.Context, jobID, mergedAt string) error {
-	_, err := s.Writer.ExecContext(ctx,
-		`UPDATE jobs SET pr_merged_at = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?`,
+	tx, err := s.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("mark job merged %s: %w", jobID, err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE jobs
+SET pr_merged_at = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ? AND (pr_merged_at IS NULL OR pr_merged_at = '')`,
 		mergedAt, jobID)
 	if err != nil {
+		return fmt.Errorf("mark job merged %s: %w", jobID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		if err := enqueueNotificationEventTx(ctx, tx, jobID, NotificationEventPRMerged); err != nil {
+			return fmt.Errorf("mark job merged %s: %w", jobID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("mark job merged %s: %w", jobID, err)
 	}
 	return nil

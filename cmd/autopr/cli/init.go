@@ -184,6 +184,13 @@ auto_pr = false                 # set true to auto-create PRs after tests pass
 [llm]
 provider = "codex"              # codex|claude
 
+[notifications]
+# webhook_url = "https://example.com/hook"                     # generic JSON webhook
+# slack_webhook = "https://hooks.slack.com/services/..."       # Slack incoming webhook
+# desktop = true                                                # macOS desktop notifications
+# triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
+# Set triggers = [] to disable all notifications.
+
 # --- GitHub example ---
 [[projects]]
 name = "my-project"

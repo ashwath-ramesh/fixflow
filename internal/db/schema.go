@@ -103,6 +103,22 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
     last_synced_at TEXT NOT NULL,
     PRIMARY KEY(project_name, source)
 );
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK(event_type IN ('awaiting_approval','failed','pr_created','pr_merged')),
+    status     TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
+    attempts   INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_events_status_created
+    ON notification_events(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_notification_events_job
+    ON notification_events(job_id);
 `
 
 func (s *Store) createSchema() error {
