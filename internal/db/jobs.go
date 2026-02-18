@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/mattn/go-sqlite3"
 )
 
 // ErrDuplicateActiveJob is returned when attempting to create a job for an issue
@@ -134,8 +132,7 @@ func (s *Store) CreateJob(ctx context.Context, autoprIssueID, projectName string
 	const q = `INSERT INTO jobs(id, autopr_issue_id, project_name, state, max_iterations) VALUES(?,?,?,'queued',?)`
 	_, err = s.Writer.ExecContext(ctx, q, id, autoprIssueID, projectName, maxIterations)
 	if err != nil {
-		var sqliteErr sqlite3.Error
-		if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return "", ErrDuplicateActiveJob
 		}
 		return "", fmt.Errorf("create job: %w", err)
