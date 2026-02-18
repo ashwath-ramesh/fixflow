@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+
+	"autopr/internal/httputil"
 )
 
 // CreateGitHubPR creates a pull request on GitHub and returns its HTML URL.
@@ -26,15 +29,17 @@ func CreateGitHubPR(ctx context.Context, token, owner, repo, head, base, title, 
 	}
 
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(buf))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(buf))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
 	if err != nil {
 		return "", fmt.Errorf("github create PR: %w", err)
 	}
@@ -74,14 +79,16 @@ func CreateGitHubPR(ctx context.Context, token, owner, repo, head, base, title, 
 // findGitHubPR looks up an existing open PR for the given head branch.
 func findGitHubPR(ctx context.Context, token, owner, repo, head string) (string, error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?head=%s:%s&state=open", owner, repo, owner, head)
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
 	if err != nil {
 		return "", err
 	}
@@ -122,20 +129,34 @@ func CreateGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch
 	}
 
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests", baseURL, projectID)
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(buf))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("PRIVATE-TOKEN", token)
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(buf))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("PRIVATE-TOKEN", token)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
 	if err != nil {
 		return "", fmt.Errorf("gitlab create MR: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
+
+	// 409 Conflict — MR may already exist for this source branch.
+	if resp.StatusCode == http.StatusConflict {
+		if existing, err := findGitLabMR(ctx, token, baseURL, projectID, sourceBranch); err == nil && existing != "" {
+			return existing, nil
+		}
+		msg := string(respBody)
+		if len(msg) > 4096 {
+			msg = msg[:4096]
+		}
+		return "", fmt.Errorf("gitlab create MR: HTTP %d: %s", resp.StatusCode, msg)
+	}
 
 	if resp.StatusCode != http.StatusCreated {
 		msg := string(respBody)
@@ -152,6 +173,41 @@ func CreateGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch
 		return "", fmt.Errorf("decode MR response: %w", err)
 	}
 	return result.WebURL, nil
+}
+
+// findGitLabMR looks up an existing open MR for the given source branch.
+func findGitLabMR(ctx context.Context, token, baseURL, projectID, sourceBranch string) (string, error) {
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests?source_branch=%s&state=opened",
+		baseURL, projectID, url.QueryEscape(sourceBranch))
+
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("PRIVATE-TOKEN", token)
+		return req, nil
+	}, httputil.DefaultRetryConfig())
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("list MRs: HTTP %d", resp.StatusCode)
+	}
+
+	var mrs []struct {
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(body, &mrs); err != nil {
+		return "", err
+	}
+	if len(mrs) > 0 {
+		return mrs[0].WebURL, nil
+	}
+	return "", nil
 }
 
 // PRMergeStatus holds the result of a PR/MR status check.
@@ -182,14 +238,16 @@ func CheckGitHubPRStatus(ctx context.Context, token, prURL string) (PRMergeStatu
 	owner, repo := parts[0], parts[1]
 
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s", owner, repo, prNumber)
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return PRMergeStatus{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
 	if err != nil {
 		return PRMergeStatus{}, fmt.Errorf("check PR status: %w", err)
 	}
@@ -243,13 +301,15 @@ func CheckGitLabMRStatus(ctx context.Context, token, baseURL, mrURL string) (PRM
 	projectPath := strings.ReplaceAll(trimmed[:mrIdx], "/", "%2F")
 
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%s", baseURL, projectPath, mrNumber)
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return PRMergeStatus{}, err
-	}
-	req.Header.Set("PRIVATE-TOKEN", token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("PRIVATE-TOKEN", token)
+		return req, nil
+	}, httputil.DefaultRetryConfig())
 	if err != nil {
 		return PRMergeStatus{}, fmt.Errorf("check MR status: %w", err)
 	}

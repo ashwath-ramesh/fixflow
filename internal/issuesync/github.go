@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"time"
 
 	"autopr/internal/config"
 	"autopr/internal/db"
+	"autopr/internal/httputil"
 )
 
 func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error {
@@ -39,34 +41,58 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 		params.Set("since", cursor)
 	}
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?%s", owner, repo, params.Encode())
+	nextURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?%s", owner, repo, params.Encode())
+	token := s.cfg.Tokens.GitHub
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	const maxPages = 50
+	var latestUpdated string
+
+	for page := range maxPages {
+		currentURL := nextURL
+
+		resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("Accept", "application/vnd.github+json")
+			return req, nil
+		}, httputil.DefaultRetryConfig())
+		if err != nil {
+			return fmt.Errorf("fetch github issues: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			return fmt.Errorf("github API %d: %s", resp.StatusCode, string(body))
+		}
+
+		var issues []githubIssue
+		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("decode github issues: %w", err)
+		}
+
+		linkHeader := resp.Header.Get("Link")
+		resp.Body.Close()
+
+		slog.Debug("sync: github issues fetched", "project", p.Name, "page", page+1, "count", len(issues))
+
+		if len(issues) == 0 {
+			break
+		}
+
+		if lu := s.syncGitHubIssues(ctx, p, issues); lu != "" {
+			latestUpdated = lu
+		}
+
+		nextURL = parseGitHubNextURL(linkHeader)
+		if nextURL == "" {
+			break
+		}
 	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Tokens.GitHub)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch github issues: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("github API %d: %s", resp.StatusCode, string(body))
-	}
-
-	var issues []githubIssue
-	if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-		return fmt.Errorf("decode github issues: %w", err)
-	}
-
-	slog.Debug("sync: github issues fetched", "project", p.Name, "count", len(issues))
-
-	latestUpdated := s.syncGitHubIssues(ctx, p, issues)
 
 	if latestUpdated != "" {
 		if err := s.store.SetCursor(ctx, p.Name, "github", latestUpdated); err != nil {
@@ -149,4 +175,15 @@ type githubIssue struct {
 
 type githubLabel struct {
 	Name string `json:"name"`
+}
+
+var githubNextLinkRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
+
+// parseGitHubNextURL extracts the "next" URL from a GitHub Link header.
+func parseGitHubNextURL(link string) string {
+	m := githubNextLinkRe.FindStringSubmatch(link)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
 }

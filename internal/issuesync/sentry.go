@@ -11,6 +11,7 @@ import (
 
 	"autopr/internal/config"
 	"autopr/internal/db"
+	"autopr/internal/httputil"
 )
 
 func (s *Syncer) syncSentry(ctx context.Context, p *config.ProjectConfig) error {
@@ -23,66 +24,92 @@ func (s *Syncer) syncSentry(ctx context.Context, p *config.ProjectConfig) error 
 	project := p.Sentry.Project
 	baseURL := s.cfg.Sentry.BaseURL
 
-	apiURL := fmt.Sprintf("%s/api/0/projects/%s/%s/issues/?query=is:unresolved&sort=date", baseURL, org, project)
+	baseAPIURL := fmt.Sprintf("%s/api/0/projects/%s/%s/issues/?query=is:unresolved&sort=date", baseURL, org, project)
 
 	// Get cursor for pagination.
 	cursor, err := s.store.GetCursor(ctx, p.Name, "sentry")
 	if err != nil {
 		return err
 	}
+
+	token := s.cfg.Tokens.Sentry
+
+	const maxPages = 50
+	var lastCursor string
+	nextURL := baseAPIURL
 	if cursor != "" {
-		apiURL += "&cursor=" + cursor
+		nextURL += "&cursor=" + cursor
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Tokens.Sentry)
+	for page := range maxPages {
+		currentURL := nextURL
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch sentry issues: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("sentry API %d: %s", resp.StatusCode, string(body))
-	}
-
-	var issues []sentryIssue
-	if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-		return fmt.Errorf("decode sentry issues: %w", err)
-	}
-
-	slog.Debug("sync: sentry issues fetched", "project", p.Name, "count", len(issues))
-
-	for _, issue := range issues {
-		body := fmt.Sprintf("Sentry Issue: %s\n\nCulprit: %s\nCount: %d\nFirst Seen: %s\nLast Seen: %s\n\nPermalink: %s",
-			issue.Title, issue.Culprit, issue.Count, issue.FirstSeen, issue.LastSeen, issue.Permalink)
-
-		ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
-			ProjectName:   p.Name,
-			Source:        "sentry",
-			SourceIssueID: issue.ID,
-			Title:         issue.Title,
-			Body:          body,
-			URL:           issue.Permalink,
-			State:         "open",
-			SourceUpdated: issue.LastSeen,
-		})
+		resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			return req, nil
+		}, httputil.DefaultRetryConfig())
 		if err != nil {
-			slog.Error("sync: upsert sentry issue", "id", issue.ID, "err", err)
-			continue
+			return fmt.Errorf("fetch sentry issues: %w", err)
 		}
 
-		s.createJobIfNeeded(ctx, ffid, p.Name)
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			return fmt.Errorf("sentry API %d: %s", resp.StatusCode, string(body))
+		}
+
+		var issues []sentryIssue
+		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("decode sentry issues: %w", err)
+		}
+
+		linkHeader := resp.Header.Get("Link")
+		resp.Body.Close()
+
+		slog.Debug("sync: sentry issues fetched", "project", p.Name, "page", page+1, "count", len(issues))
+
+		if len(issues) == 0 {
+			break
+		}
+
+		for _, issue := range issues {
+			body := fmt.Sprintf("Sentry Issue: %s\n\nCulprit: %s\nCount: %d\nFirst Seen: %s\nLast Seen: %s\n\nPermalink: %s",
+				issue.Title, issue.Culprit, issue.Count, issue.FirstSeen, issue.LastSeen, issue.Permalink)
+
+			ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
+				ProjectName:   p.Name,
+				Source:        "sentry",
+				SourceIssueID: issue.ID,
+				Title:         issue.Title,
+				Body:          body,
+				URL:           issue.Permalink,
+				State:         "open",
+				SourceUpdated: issue.LastSeen,
+			})
+			if err != nil {
+				slog.Error("sync: upsert sentry issue", "id", issue.ID, "err", err)
+				continue
+			}
+
+			s.createJobIfNeeded(ctx, ffid, p.Name)
+		}
+
+		nextCursor := parseSentryNextCursor(linkHeader)
+		if nextCursor == "" {
+			break
+		}
+		lastCursor = nextCursor
+		nextURL = baseAPIURL + "&cursor=" + nextCursor
 	}
 
-	// Update cursor from Link header if available.
-	if nextCursor := parseSentryNextCursor(resp.Header.Get("Link")); nextCursor != "" {
-		if err := s.store.SetCursor(ctx, p.Name, "sentry", nextCursor); err != nil {
+	// Save final cursor after full loop completes.
+	if lastCursor != "" {
+		if err := s.store.SetCursor(ctx, p.Name, "sentry", lastCursor); err != nil {
 			slog.Error("sync: set sentry cursor", "err", err)
 		}
 	}
