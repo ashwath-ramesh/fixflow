@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -193,6 +194,11 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// Create job.
 	jobID, err := s.store.CreateJob(ctx, ffid, projectCfg.Name, s.cfg.Daemon.MaxIterations)
 	if err != nil {
+		if errors.Is(err, db.ErrDuplicateActiveJob) {
+			slog.Debug("webhook: active job already exists, skipping", "ffid", ffid)
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		slog.Error("webhook: create job", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

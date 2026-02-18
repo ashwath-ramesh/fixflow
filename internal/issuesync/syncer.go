@@ -2,6 +2,7 @@ package issuesync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -88,6 +89,10 @@ func (s *Syncer) createJobIfNeeded(ctx context.Context, ffid, projectName string
 
 	jobID, err := s.store.CreateJob(ctx, ffid, projectName, s.cfg.Daemon.MaxIterations)
 	if err != nil {
+		if errors.Is(err, db.ErrDuplicateActiveJob) {
+			slog.Debug("sync: active job already exists, skipping", "ffid", ffid)
+			return
+		}
 		slog.Error("sync: create job", "err", err)
 		return
 	}

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1136,5 +1137,164 @@ func TestMarkRunningSessionsCancelledAndCompleteSessionRace(t *testing.T) {
 	}
 	if sessions[0].Status != "cancelled" {
 		t.Fatalf("expected cancelled session status, got %q", sessions[0].Status)
+	}
+}
+
+func TestCreateJobDuplicateActiveReturnsErrDuplicate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ffid, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "dup-1",
+		Title:         "duplicate test",
+		URL:           "https://github.com/org/repo/issues/dup-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	// First job should succeed.
+	_, err = store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("first create job: %v", err)
+	}
+
+	// Second job for the same issue should return sentinel error.
+	_, err = store.CreateJob(ctx, ffid, "myproject", 3)
+	if err == nil {
+		t.Fatalf("expected error on duplicate create")
+	}
+	if !errors.Is(err, ErrDuplicateActiveJob) {
+		t.Fatalf("expected ErrDuplicateActiveJob, got: %v", err)
+	}
+}
+
+func TestResetJobForRetryBlockedByActiveSibling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ffid, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "sibling-1",
+		Title:         "sibling test",
+		URL:           "https://github.com/org/repo/issues/sibling-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	// Create job A (will be failed).
+	jobA, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job A: %v", err)
+	}
+
+	// Transition job A to failed.
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil || claimedID != jobA {
+		t.Fatalf("claim job A: id=%q err=%v", claimedID, err)
+	}
+	if err := store.TransitionState(ctx, jobA, "planning", "failed"); err != nil {
+		t.Fatalf("transition A to failed: %v", err)
+	}
+
+	// Create job B (active — queued).
+	jobB, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job B: %v", err)
+	}
+
+	// Retry job A should fail due to active sibling B.
+	err = store.ResetJobForRetry(ctx, jobA, "retry")
+	if err == nil {
+		t.Fatalf("expected retry to be blocked by active sibling")
+	}
+	if !strings.Contains(err.Error(), "another active job") {
+		t.Fatalf("expected active sibling error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), jobB) {
+		t.Fatalf("expected error to contain sibling job ID %s, got: %v", jobB, err)
+	}
+}
+
+func TestRetrySucceedsWhenNoActiveSibling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ffid, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "no-sibling-1",
+		Title:         "no sibling test",
+		URL:           "https://github.com/org/repo/issues/no-sibling-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	// Create job A, transition to failed.
+	jobA, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job A: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil || claimedID != jobA {
+		t.Fatalf("claim job A: id=%q err=%v", claimedID, err)
+	}
+	if err := store.TransitionState(ctx, jobA, "planning", "failed"); err != nil {
+		t.Fatalf("transition A to failed: %v", err)
+	}
+
+	// Create job B, also transition to failed (terminal — not active).
+	jobB, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job B: %v", err)
+	}
+	claimedID, err = store.ClaimJob(ctx)
+	if err != nil || claimedID != jobB {
+		t.Fatalf("claim job B: id=%q err=%v", claimedID, err)
+	}
+	if err := store.TransitionState(ctx, jobB, "planning", "failed"); err != nil {
+		t.Fatalf("transition B to failed: %v", err)
+	}
+
+	// Retry job A should succeed since sibling B is also in terminal state.
+	if err := store.ResetJobForRetry(ctx, jobA, "retry with no active sibling"); err != nil {
+		t.Fatalf("reset for retry should succeed: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, jobA)
+	if err != nil {
+		t.Fatalf("get job A: %v", err)
+	}
+	if job.State != "queued" {
+		t.Fatalf("expected queued, got %q", job.State)
 	}
 }
