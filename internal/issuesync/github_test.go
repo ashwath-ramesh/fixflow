@@ -245,3 +245,80 @@ func getOnlyJobID(t *testing.T, ctx context.Context, store *db.Store) string {
 	}
 	return jobID
 }
+
+func TestParseGitHubNextURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		link string
+		want string
+	}{
+		{
+			name: "has next",
+			link: `<https://api.github.com/repos/o/r/issues?page=2>; rel="next", <https://api.github.com/repos/o/r/issues?page=5>; rel="last"`,
+			want: "https://api.github.com/repos/o/r/issues?page=2",
+		},
+		{
+			name: "last page no next",
+			link: `<https://api.github.com/repos/o/r/issues?page=1>; rel="prev", <https://api.github.com/repos/o/r/issues?page=1>; rel="first"`,
+			want: "",
+		},
+		{
+			name: "empty header",
+			link: "",
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseGitHubNextURL(tc.link)
+			if got != tc.want {
+				t.Fatalf("parseGitHubNextURL: want %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestSyncGitHubPaginates(t *testing.T) {
+	t.Parallel()
+
+	page1 := []githubIssue{
+		{Number: 1, Title: "issue one", Body: "b1", HTMLURL: "https://github.com/o/r/issues/1", UpdatedAt: "2026-02-17T10:00:00Z"},
+		{Number: 2, Title: "issue two", Body: "b2", HTMLURL: "https://github.com/o/r/issues/2", UpdatedAt: "2026-02-17T10:01:00Z"},
+	}
+	page2 := []githubIssue{
+		{Number: 3, Title: "issue three", Body: "b3", HTMLURL: "https://github.com/o/r/issues/3", UpdatedAt: "2026-02-17T10:02:00Z"},
+	}
+
+	store := openTestStore(t)
+	defer store.Close()
+
+	cfg := &config.Config{
+		Tokens: config.TokensConfig{GitHub: "test-token"},
+		Daemon: config.DaemonConfig{MaxIterations: 3},
+	}
+	project := &config.ProjectConfig{
+		Name: "paginate-test",
+		GitHub: &config.ProjectGitHub{
+			Owner: "o",
+			Repo:  "r",
+		},
+	}
+
+	syncer := NewSyncer(cfg, store, make(chan string, 8))
+	ctx := context.Background()
+
+	// Simulate two pages being processed via syncGitHubIssues (the per-page
+	// handler). The pagination loop in syncGitHub drives page fetching;
+	// parseGitHubNextURL is tested separately above.
+	syncer.syncGitHubIssues(ctx, project, page1)
+	syncer.syncGitHubIssues(ctx, project, page2)
+
+	// Verify all 3 issues were upserted.
+	for _, num := range []string{"1", "2", "3"} {
+		_ = getIssueBySourceID(t, ctx, store, "paginate-test", "github", num)
+	}
+}

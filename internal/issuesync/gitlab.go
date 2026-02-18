@@ -12,6 +12,7 @@ import (
 
 	"autopr/internal/config"
 	"autopr/internal/db"
+	"autopr/internal/httputil"
 )
 
 func (s *Syncer) syncGitLab(ctx context.Context, p *config.ProjectConfig) error {
@@ -42,60 +43,82 @@ func (s *Syncer) syncGitLab(ctx context.Context, p *config.ProjectConfig) error 
 		params.Set("updated_after", cursor)
 	}
 
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?%s", baseURL, projectID, params.Encode())
+	baseAPIURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?%s", baseURL, projectID, params.Encode())
+	token := s.cfg.Tokens.GitLab
 
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("PRIVATE-TOKEN", s.cfg.Tokens.GitLab)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch gitlab issues: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("gitlab API %d: %s", resp.StatusCode, string(body))
-	}
-
-	var issues []gitlabIssue
-	if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
-		return fmt.Errorf("decode gitlab issues: %w", err)
-	}
-
-	slog.Debug("sync: gitlab issues fetched", "project", p.Name, "count", len(issues))
-
+	const maxPages = 50
 	var latestUpdated string
-	for _, issue := range issues {
-		// Skip issues created by autopr (contain our marker).
-		if containsMarker(issue.Description) {
-			continue
-		}
+	nextPage := "1"
 
-		labels := make([]string, 0, len(issue.Labels))
-		labels = append(labels, issue.Labels...)
+	for page := range maxPages {
+		currentURL := baseAPIURL + "&page=" + nextPage
 
-		ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
-			ProjectName:   p.Name,
-			Source:        "gitlab",
-			SourceIssueID: fmt.Sprintf("%d", issue.IID),
-			Title:         issue.Title,
-			Body:          issue.Description,
-			URL:           issue.WebURL,
-			State:         "open",
-			Labels:        labels,
-			SourceUpdated: issue.UpdatedAt,
-		})
+		resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("PRIVATE-TOKEN", token)
+			return req, nil
+		}, httputil.DefaultRetryConfig())
 		if err != nil {
-			slog.Error("sync: upsert gitlab issue", "iid", issue.IID, "err", err)
-			continue
+			return fmt.Errorf("fetch gitlab issues: %w", err)
 		}
 
-		s.createJobIfNeeded(ctx, ffid, p.Name)
-		latestUpdated = issue.UpdatedAt
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			return fmt.Errorf("gitlab API %d: %s", resp.StatusCode, string(body))
+		}
+
+		var issues []gitlabIssue
+		if err := json.NewDecoder(resp.Body).Decode(&issues); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("decode gitlab issues: %w", err)
+		}
+
+		xNextPage := resp.Header.Get("X-Next-Page")
+		resp.Body.Close()
+
+		slog.Debug("sync: gitlab issues fetched", "project", p.Name, "page", page+1, "count", len(issues))
+
+		if len(issues) == 0 {
+			break
+		}
+
+		for _, issue := range issues {
+			// Skip issues created by autopr (contain our marker).
+			if containsMarker(issue.Description) {
+				continue
+			}
+
+			labels := make([]string, 0, len(issue.Labels))
+			labels = append(labels, issue.Labels...)
+
+			ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
+				ProjectName:   p.Name,
+				Source:        "gitlab",
+				SourceIssueID: fmt.Sprintf("%d", issue.IID),
+				Title:         issue.Title,
+				Body:          issue.Description,
+				URL:           issue.WebURL,
+				State:         "open",
+				Labels:        labels,
+				SourceUpdated: issue.UpdatedAt,
+			})
+			if err != nil {
+				slog.Error("sync: upsert gitlab issue", "iid", issue.IID, "err", err)
+				continue
+			}
+
+			s.createJobIfNeeded(ctx, ffid, p.Name)
+			latestUpdated = issue.UpdatedAt
+		}
+
+		nextPage = strings.TrimSpace(xNextPage)
+		if nextPage == "" {
+			break
+		}
 	}
 
 	// Update cursor.
