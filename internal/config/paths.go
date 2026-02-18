@@ -64,3 +64,12 @@ func StateDir() (string, error) {
 	}
 	return filepath.Join(base, "autopr"), nil
 }
+
+// VersionCheckPath returns the path to the cached version-check file.
+func VersionCheckPath() (string, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "version-check.json"), nil
+}

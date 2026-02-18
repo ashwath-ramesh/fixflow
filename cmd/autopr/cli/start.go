@@ -11,6 +11,7 @@ import (
 
 	"autopr/internal/config"
 	"autopr/internal/daemon"
+	"autopr/internal/update"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +30,8 @@ func init() {
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
+	maybePrintUpgradeNotice(version, os.Stdout, update.NewManager(version))
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
