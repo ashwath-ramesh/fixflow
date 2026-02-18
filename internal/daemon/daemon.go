@@ -119,15 +119,35 @@ func Run(cfg *config.Config, foreground bool) error {
 	<-ctx.Done()
 	slog.Info("shutdown signal received, stopping...")
 
-	// Graceful shutdown.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Force-exit on second signal.
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		slog.Error("second signal received, forcing exit")
+		os.Exit(1)
+	}()
+
+	// Graceful shutdown with hard deadline.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	_ = httpSrv.Shutdown(shutdownCtx)
-	pool.Stop()
-	wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		_ = httpSrv.Shutdown(shutdownCtx)
+		pool.Stop()
+		wg.Wait()
+		close(done)
+	}()
 
-	slog.Info("daemon stopped")
+	select {
+	case <-done:
+		slog.Info("daemon stopped")
+	case <-shutdownCtx.Done():
+		slog.Error("shutdown timed out after 10s, forcing exit")
+		os.Exit(1)
+	}
+
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	"autopr/internal/daemon"
 
@@ -44,5 +45,20 @@ func runStop(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Stopping daemon (pid %d)...\n", pid)
+
+	// Wait for process to exit.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !daemon.ProcessAlive(pid) {
+			fmt.Println("Daemon stopped.")
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Force kill.
+	_ = proc.Signal(syscall.SIGKILL)
+	daemon.RemovePID(cfg.Daemon.PIDFile)
+	fmt.Println("Daemon killed (did not stop gracefully).")
 	return nil
 }
