@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -215,7 +216,13 @@ func (r *Runner) failJob(ctx context.Context, jobID, fromState, errMsg string) e
 }
 
 func (r *Runner) invokeProvider(ctx context.Context, jobID, step string, iteration int, workDir, prompt string) (llm.Response, error) {
-	sessionID, err := r.store.CreateSession(ctx, jobID, step, iteration, r.provider.Name())
+	// Generate JSONL path before session creation so it's stored in the DB
+	// and discoverable by `ap logs --follow`.
+	jsonlDir := filepath.Join(filepath.Dir(workDir), "sessions")
+	_ = os.MkdirAll(jsonlDir, 0o755)
+	jsonlPath := filepath.Join(jsonlDir, fmt.Sprintf("session-%d.jsonl", time.Now().UnixNano()))
+
+	sessionID, err := r.store.CreateSession(ctx, jobID, step, iteration, r.provider.Name(), jsonlPath)
 	if err != nil {
 		return llm.Response{}, fmt.Errorf("create session: %w", err)
 	}
@@ -250,7 +257,7 @@ func (r *Runner) invokeProvider(ctx context.Context, jobID, step string, iterati
 		}
 	}()
 
-	resp, err = r.provider.Run(ctx, workDir, prompt)
+	resp, err = r.provider.Run(ctx, workDir, prompt, jsonlPath)
 	return resp, err
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"autopr/internal/cost"
 	"autopr/internal/db"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,7 @@ import (
 var (
 	listProject string
 	listState   string
+	listCost    bool
 )
 
 var listCmd = &cobra.Command{
@@ -23,6 +25,7 @@ var listCmd = &cobra.Command{
 func init() {
 	listCmd.Flags().StringVar(&listProject, "project", "", "filter by project name")
 	listCmd.Flags().StringVar(&listState, "state", "all", "filter by state")
+	listCmd.Flags().BoolVar(&listCost, "cost", false, "show estimated cost column")
 	rootCmd.AddCommand(listCmd)
 }
 
@@ -52,19 +55,48 @@ func runList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-55s %s\n", "JOB", "STATE", "PROJECT", "SOURCE", "RETRY", "ISSUE", "UPDATED")
-	fmt.Println(strings.Repeat("-", 136))
+	// Optionally fetch cost data.
+	var costMap map[string]db.TokenSummary
+	if listCost && len(jobs) > 0 {
+		ids := make([]string, len(jobs))
+		for i, j := range jobs {
+			ids[i] = j.ID
+		}
+		costMap, _ = store.AggregateTokensForJobs(cmd.Context(), ids)
+	}
+
+	if listCost {
+		fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-8s %-45s %s\n", "JOB", "STATE", "PROJECT", "SOURCE", "RETRY", "COST", "ISSUE", "UPDATED")
+		fmt.Println(strings.Repeat("-", 136))
+	} else {
+		fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-55s %s\n", "JOB", "STATE", "PROJECT", "SOURCE", "RETRY", "ISSUE", "UPDATED")
+		fmt.Println(strings.Repeat("-", 136))
+	}
+
 	for _, j := range jobs {
 		source := ""
 		if j.IssueSource != "" && j.SourceIssueID != "" {
 			source = fmt.Sprintf("%s #%s", capitalize(j.IssueSource), j.SourceIssueID)
 		}
-		title := truncate(j.IssueTitle, 55)
 
-		fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-55s %s\n",
-			db.ShortID(j.ID), db.DisplayState(j.State, j.PRMergedAt, j.PRClosedAt), truncate(j.ProjectName, 12), source,
-			fmt.Sprintf("%d/%d", j.Iteration, j.MaxIterations),
-			title, j.UpdatedAt)
+		if listCost {
+			costStr := "-"
+			if ts, ok := costMap[j.ID]; ok && ts.SessionCount > 0 {
+				c := cost.Calculate(ts.Provider, ts.TotalInputTokens, ts.TotalOutputTokens)
+				costStr = cost.FormatUSD(c)
+			}
+			title := truncate(j.IssueTitle, 45)
+			fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-8s %-45s %s\n",
+				db.ShortID(j.ID), db.DisplayState(j.State, j.PRMergedAt, j.PRClosedAt), truncate(j.ProjectName, 12), source,
+				fmt.Sprintf("%d/%d", j.Iteration, j.MaxIterations),
+				costStr, title, j.UpdatedAt)
+		} else {
+			title := truncate(j.IssueTitle, 55)
+			fmt.Printf("%-10s %-20s %-13s %-13s %-5s %-55s %s\n",
+				db.ShortID(j.ID), db.DisplayState(j.State, j.PRMergedAt, j.PRClosedAt), truncate(j.ProjectName, 12), source,
+				fmt.Sprintf("%d/%d", j.Iteration, j.MaxIterations),
+				title, j.UpdatedAt)
+		}
 	}
 	return nil
 }

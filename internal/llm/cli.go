@@ -24,14 +24,20 @@ func NewCLIProvider(name string) *CLIProvider {
 
 func (p *CLIProvider) Name() string { return p.name }
 
-func (p *CLIProvider) Run(ctx context.Context, workDir, prompt string) (Response, error) {
+func (p *CLIProvider) Run(ctx context.Context, workDir, prompt, jsonlPath string) (Response, error) {
 	start := time.Now()
 
-	// Store JSONL outside the work dir so it doesn't pollute git status,
-	// but in a persistent location so the TUI can display session details.
-	jsonlDir := filepath.Join(filepath.Dir(workDir), "sessions")
-	_ = os.MkdirAll(jsonlDir, 0o755)
-	jsonlFile := filepath.Join(jsonlDir, fmt.Sprintf("session-%d.jsonl", time.Now().UnixNano()))
+	// Use the externally-provided JSONL path so it's known at session creation
+	// and can be discovered by `ap logs --follow`.
+	jsonlFile := jsonlPath
+	if jsonlFile == "" {
+		// Fallback: generate a path (shouldn't happen in normal pipeline flow).
+		jsonlDir := filepath.Join(filepath.Dir(workDir), "sessions")
+		_ = os.MkdirAll(jsonlDir, 0o755)
+		jsonlFile = filepath.Join(jsonlDir, fmt.Sprintf("session-%d.jsonl", time.Now().UnixNano()))
+	} else {
+		_ = os.MkdirAll(filepath.Dir(jsonlFile), 0o755)
+	}
 
 	args := p.buildArgs(prompt, jsonlFile)
 

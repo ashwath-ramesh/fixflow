@@ -8,8 +8,9 @@ type Provider interface {
 	Name() string
 
 	// Run invokes the LLM CLI tool in the given workDir with the given prompt.
+	// jsonlPath is the pre-determined path for the JSONL session file.
 	// Returns the response with token counts and timing.
-	Run(ctx context.Context, workDir, prompt string) (Response, error)
+	Run(ctx context.Context, workDir, prompt, jsonlPath string) (Response, error)
 }
 
 // Response captures the output of an LLM invocation.

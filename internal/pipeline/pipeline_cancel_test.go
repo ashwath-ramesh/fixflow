@@ -21,7 +21,7 @@ type blockingProvider struct {
 
 func (p *blockingProvider) Name() string { return "codex" }
 
-func (p *blockingProvider) Run(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+func (p *blockingProvider) Run(ctx context.Context, workDir, prompt, jsonlPath string) (llm.Response, error) {
 	p.once.Do(func() { close(p.started) })
 	<-ctx.Done()
 	return llm.Response{}, ctx.Err()
@@ -31,7 +31,7 @@ type neverCalledProvider struct{}
 
 func (p *neverCalledProvider) Name() string { return "codex" }
 
-func (p *neverCalledProvider) Run(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+func (p *neverCalledProvider) Run(ctx context.Context, workDir, prompt, jsonlPath string) (llm.Response, error) {
 	return llm.Response{}, errors.New("provider should not be called")
 }
 

@@ -595,9 +595,9 @@ type LLMSession struct {
 
 const recoveredSessionErrorMessage = "session recovered on daemon startup: previous run interrupted"
 
-func (s *Store) CreateSession(ctx context.Context, jobID, step string, iteration int, provider string) (int64, error) {
-	const q = `INSERT INTO llm_sessions(job_id, step, iteration, llm_provider) VALUES(?,?,?,?)`
-	res, err := s.Writer.ExecContext(ctx, q, jobID, step, iteration, provider)
+func (s *Store) CreateSession(ctx context.Context, jobID, step string, iteration int, provider, jsonlPath string) (int64, error) {
+	const q = `INSERT INTO llm_sessions(job_id, step, iteration, llm_provider, jsonl_path) VALUES(?,?,?,?,?)`
+	res, err := s.Writer.ExecContext(ctx, q, jobID, step, iteration, provider, jsonlPath)
 	if err != nil {
 		return 0, fmt.Errorf("create session: %w", err)
 	}
@@ -854,6 +854,103 @@ func ShortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// TokenSummary holds aggregated token/cost data for a job's sessions.
+type TokenSummary struct {
+	TotalInputTokens  int
+	TotalOutputTokens int
+	TotalDurationMS   int
+	SessionCount      int
+	Provider          string // Most-used provider (for cost calculation).
+}
+
+// AggregateTokensByJob returns aggregated token counts for a single job.
+func (s *Store) AggregateTokensByJob(ctx context.Context, jobID string) (TokenSummary, error) {
+	const q = `
+SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(duration_ms),0), COUNT(*),
+       COALESCE((SELECT llm_provider FROM llm_sessions WHERE job_id = ? AND status IN ('completed','failed')
+                 GROUP BY llm_provider ORDER BY COUNT(*) DESC LIMIT 1), '')
+FROM llm_sessions WHERE job_id = ? AND status IN ('completed','failed')`
+	var ts TokenSummary
+	err := s.Reader.QueryRowContext(ctx, q, jobID, jobID).Scan(
+		&ts.TotalInputTokens, &ts.TotalOutputTokens,
+		&ts.TotalDurationMS, &ts.SessionCount, &ts.Provider,
+	)
+	if err != nil {
+		return TokenSummary{}, fmt.Errorf("aggregate tokens for job %s: %w", jobID, err)
+	}
+	return ts, nil
+}
+
+// AggregateTokensForJobs returns aggregated token counts for multiple jobs.
+func (s *Store) AggregateTokensForJobs(ctx context.Context, jobIDs []string) (map[string]TokenSummary, error) {
+	if len(jobIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(jobIDs))
+	args := make([]any, len(jobIDs))
+	for i, id := range jobIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	ph := strings.Join(placeholders, ",")
+
+	q := fmt.Sprintf(`
+SELECT job_id, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(duration_ms),0), COUNT(*),
+       COALESCE((SELECT s2.llm_provider FROM llm_sessions s2
+                 WHERE s2.job_id = llm_sessions.job_id AND s2.status IN ('completed','failed')
+                 GROUP BY s2.llm_provider ORDER BY COUNT(*) DESC LIMIT 1), '')
+FROM llm_sessions
+WHERE job_id IN (%s) AND status IN ('completed','failed')
+GROUP BY job_id`, ph)
+
+	rows, err := s.Reader.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate tokens for jobs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]TokenSummary, len(jobIDs))
+	for rows.Next() {
+		var ts TokenSummary
+		var jobID string
+		if err := rows.Scan(&jobID, &ts.TotalInputTokens, &ts.TotalOutputTokens,
+			&ts.TotalDurationMS, &ts.SessionCount, &ts.Provider); err != nil {
+			return nil, fmt.Errorf("scan token summary: %w", err)
+		}
+		out[jobID] = ts
+	}
+	return out, rows.Err()
+}
+
+// GetRunningSessionForJob returns the most recent running session for a job, or nil if none.
+func (s *Store) GetRunningSessionForJob(ctx context.Context, jobID string) (*LLMSession, error) {
+	const q = `
+SELECT id, job_id, step, iteration, llm_provider,
+       COALESCE(prompt_hash,''), COALESCE(response_text,''),
+       COALESCE(input_tokens,0), COALESCE(output_tokens,0), COALESCE(duration_ms,0),
+       COALESCE(jsonl_path,''), COALESCE(commit_sha,''), status,
+       COALESCE(error_message,''), created_at, COALESCE(completed_at,'')
+FROM llm_sessions WHERE job_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1`
+	var sess LLMSession
+	err := s.Reader.QueryRowContext(ctx, q, jobID).Scan(
+		&sess.ID, &sess.JobID, &sess.Step, &sess.Iteration, &sess.LLMProvider,
+		&sess.PromptHash, &sess.ResponseText,
+		&sess.InputTokens, &sess.OutputTokens, &sess.DurationMS,
+		&sess.JSONLPath, &sess.CommitSHA, &sess.Status,
+		&sess.ErrorMessage, &sess.CreatedAt, &sess.CompletedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get running session for job %s: %w", jobID, err)
+	}
+	return &sess, nil
 }
 
 // Helpers.

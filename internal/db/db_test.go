@@ -269,12 +269,12 @@ func TestRecoverRunningSessionsMarksFailed(t *testing.T) {
 		t.Fatalf("create job: %v", err)
 	}
 
-	runningID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex")
+	runningID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", "")
 	if err != nil {
 		t.Fatalf("create running session: %v", err)
 	}
 
-	completedID, err := store.CreateSession(ctx, jobID, "implement", 0, "codex")
+	completedID, err := store.CreateSession(ctx, jobID, "implement", 0, "codex", "")
 	if err != nil {
 		t.Fatalf("create completed session: %v", err)
 	}
@@ -1115,7 +1115,7 @@ func TestMarkRunningSessionsCancelledAndCompleteSessionRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	sessionID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex")
+	sessionID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", "")
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -1296,5 +1296,298 @@ func TestRetrySucceedsWhenNoActiveSibling(t *testing.T) {
 	}
 	if job.State != "queued" {
 		t.Fatalf("expected queued, got %q", job.State)
+	}
+}
+
+func TestAggregateTokensByJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "agg-1",
+		Title:         "aggregate test",
+		URL:           "https://github.com/org/repo/issues/agg-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	// No sessions yet — should return zero summary.
+	ts, err := store.AggregateTokensByJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("aggregate empty: %v", err)
+	}
+	if ts.SessionCount != 0 {
+		t.Fatalf("expected 0 sessions, got %d", ts.SessionCount)
+	}
+
+	// Create and complete two sessions.
+	s1, err := store.CreateSession(ctx, jobID, "plan", 0, "claude", "/tmp/s1.jsonl")
+	if err != nil {
+		t.Fatalf("create session 1: %v", err)
+	}
+	if err := store.CompleteSession(ctx, s1, "completed", "ok", "prompt", "", "/tmp/s1.jsonl", "", "", 100, 50, 1000); err != nil {
+		t.Fatalf("complete session 1: %v", err)
+	}
+
+	s2, err := store.CreateSession(ctx, jobID, "implement", 0, "claude", "/tmp/s2.jsonl")
+	if err != nil {
+		t.Fatalf("create session 2: %v", err)
+	}
+	if err := store.CompleteSession(ctx, s2, "completed", "ok", "prompt", "", "/tmp/s2.jsonl", "", "", 200, 100, 2000); err != nil {
+		t.Fatalf("complete session 2: %v", err)
+	}
+
+	ts, err = store.AggregateTokensByJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if ts.SessionCount != 2 {
+		t.Fatalf("expected 2 sessions, got %d", ts.SessionCount)
+	}
+	if ts.TotalInputTokens != 300 {
+		t.Fatalf("expected 300 input tokens, got %d", ts.TotalInputTokens)
+	}
+	if ts.TotalOutputTokens != 150 {
+		t.Fatalf("expected 150 output tokens, got %d", ts.TotalOutputTokens)
+	}
+	if ts.TotalDurationMS != 3000 {
+		t.Fatalf("expected 3000ms duration, got %d", ts.TotalDurationMS)
+	}
+	if ts.Provider != "claude" {
+		t.Fatalf("expected claude provider, got %q", ts.Provider)
+	}
+}
+
+func TestAggregateTokensForJobs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "batch-1",
+		Title:         "batch test",
+		URL:           "https://github.com/org/repo/issues/batch-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	s1, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", "")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.CompleteSession(ctx, s1, "completed", "", "", "", "", "", "", 500, 200, 5000); err != nil {
+		t.Fatalf("complete session: %v", err)
+	}
+
+	result, err := store.AggregateTokensForJobs(ctx, []string{jobID, "nonexistent"})
+	if err != nil {
+		t.Fatalf("aggregate for jobs: %v", err)
+	}
+	ts, ok := result[jobID]
+	if !ok {
+		t.Fatalf("expected entry for %s", jobID)
+	}
+	if ts.TotalInputTokens != 500 || ts.TotalOutputTokens != 200 {
+		t.Fatalf("unexpected tokens: %d/%d", ts.TotalInputTokens, ts.TotalOutputTokens)
+	}
+	if _, ok := result["nonexistent"]; ok {
+		t.Fatalf("did not expect entry for nonexistent job")
+	}
+}
+
+func TestAggregateTokensForJobsMixedProviders(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "mixed-1",
+		Title:         "mixed provider test",
+		URL:           "https://github.com/org/repo/issues/mixed-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	// 2 claude sessions, 1 codex session → should pick "claude"
+	for i, prov := range []string{"claude", "claude", "codex"} {
+		sid, err := store.CreateSession(ctx, jobID, "plan", i, prov, "")
+		if err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+		if err := store.CompleteSession(ctx, sid, "completed", "", "", "", "", "", "", 100, 50, 1000); err != nil {
+			t.Fatalf("complete session %d: %v", i, err)
+		}
+	}
+
+	result, err := store.AggregateTokensForJobs(ctx, []string{jobID})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	ts, ok := result[jobID]
+	if !ok {
+		t.Fatalf("expected entry for %s", jobID)
+	}
+	if ts.Provider != "claude" {
+		t.Fatalf("expected provider 'claude' (most frequent), got %q", ts.Provider)
+	}
+	if ts.SessionCount != 3 {
+		t.Fatalf("expected 3 sessions, got %d", ts.SessionCount)
+	}
+	if ts.TotalInputTokens != 300 || ts.TotalOutputTokens != 150 {
+		t.Fatalf("unexpected tokens: %d/%d", ts.TotalInputTokens, ts.TotalOutputTokens)
+	}
+}
+
+func TestGetRunningSessionForJob(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "running-1",
+		Title:         "running session test",
+		URL:           "https://github.com/org/repo/issues/running-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	// No running session.
+	sess, err := store.GetRunningSessionForJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get running session (none): %v", err)
+	}
+	if sess != nil {
+		t.Fatalf("expected nil session, got %+v", sess)
+	}
+
+	// Create a running session with JSONL path.
+	s1, err := store.CreateSession(ctx, jobID, "plan", 0, "claude", "/tmp/live.jsonl")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	sess, err = store.GetRunningSessionForJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get running session: %v", err)
+	}
+	if sess == nil {
+		t.Fatalf("expected running session")
+	}
+	if sess.ID != int(s1) {
+		t.Fatalf("expected session ID %d, got %d", s1, sess.ID)
+	}
+	if sess.JSONLPath != "/tmp/live.jsonl" {
+		t.Fatalf("expected jsonl path /tmp/live.jsonl, got %q", sess.JSONLPath)
+	}
+
+	// Complete the session — should no longer appear.
+	if err := store.CompleteSession(ctx, s1, "completed", "ok", "", "", "", "", "", 0, 0, 0); err != nil {
+		t.Fatalf("complete session: %v", err)
+	}
+	sess, err = store.GetRunningSessionForJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get running session after complete: %v", err)
+	}
+	if sess != nil {
+		t.Fatalf("expected nil after completion, got %+v", sess)
+	}
+}
+
+func TestCreateSessionStoresJSONLPath(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "jsonl-1",
+		Title:         "jsonl path test",
+		URL:           "https://github.com/org/repo/issues/jsonl-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	jsonlPath := "/data/sessions/session-12345.jsonl"
+	sessionID, err := store.CreateSession(ctx, jobID, "plan", 0, "claude", jsonlPath)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	sess, err := store.GetFullSession(ctx, int(sessionID))
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if sess.JSONLPath != jsonlPath {
+		t.Fatalf("expected jsonl path %q, got %q", jsonlPath, sess.JSONLPath)
 	}
 }

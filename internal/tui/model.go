@@ -227,24 +227,14 @@ func (m Model) fetchDiff() tea.Msg {
 		baseBranch = p.BaseBranch
 	}
 
-	// Mark untracked files as intent-to-add so they appear in diff output.
-	addN := exec.CommandContext(context.Background(), "git", "add", "-N", ".")
-	addN.Dir = job.WorktreePath
-	_ = addN.Run()
-
-	// Diff against origin base branch to show all job changes:
-	// committed, staged, unstaged, and newly created files.
-	cmd := exec.CommandContext(context.Background(),
-		"git", "diff", fmt.Sprintf("origin/%s", baseBranch))
-	cmd.Dir = job.WorktreePath
-	out, err := cmd.Output()
+	out, err := git.DiffAgainstBase(context.Background(), job.WorktreePath, baseBranch)
 	if err != nil {
 		return diffMsg{jobID: job.ID, lines: []string{fmt.Sprintf("(git diff error: %v)", err)}}
 	}
-	if len(out) == 0 {
+	if out == "" {
 		return diffMsg{jobID: job.ID, lines: []string{"(no changes)"}}
 	}
-	return diffMsg{jobID: job.ID, lines: strings.Split(string(out), "\n")}
+	return diffMsg{jobID: job.ID, lines: strings.Split(out, "\n")}
 }
 
 // openInEditor opens the worktree directory in the user's preferred editor.

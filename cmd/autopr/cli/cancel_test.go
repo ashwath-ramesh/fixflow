@@ -39,7 +39,7 @@ func TestCancelJobByIDHappyPath(t *testing.T) {
 	if err := store.UpdateJobField(ctx, jobID, "worktree_path", filepath.Join(tmp, "wt")); err != nil {
 		t.Fatalf("set worktree path: %v", err)
 	}
-	if _, err := store.CreateSession(ctx, jobID, "plan", 0, "codex"); err != nil {
+	if _, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", ""); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 

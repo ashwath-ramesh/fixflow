@@ -17,7 +17,7 @@ type stubProvider struct {
 
 func (p stubProvider) Name() string { return "codex" }
 
-func (p stubProvider) Run(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+func (p stubProvider) Run(ctx context.Context, workDir, prompt, jsonlPath string) (llm.Response, error) {
 	return p.run(ctx, workDir, prompt)
 }
 
