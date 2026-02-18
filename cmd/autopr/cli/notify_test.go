@@ -23,7 +23,6 @@ func (s notifyStubSender) Name() string { return s.name }
 func (s notifyStubSender) Send(context.Context, notify.Payload) error { return nil }
 
 func TestRunNotifyTestSuccess(t *testing.T) {
-	t.Parallel()
 	origBuild := buildNotifySenders
 	origSend := sendNotifyAll
 	t.Cleanup(func() {
@@ -49,7 +48,6 @@ func TestRunNotifyTestSuccess(t *testing.T) {
 }
 
 func TestRunNotifyTestNoChannels(t *testing.T) {
-	t.Parallel()
 	origBuild := buildNotifySenders
 	t.Cleanup(func() { buildNotifySenders = origBuild })
 
@@ -66,7 +64,6 @@ func TestRunNotifyTestNoChannels(t *testing.T) {
 }
 
 func TestRunNotifyTestAllFailures(t *testing.T) {
-	t.Parallel()
 	origBuild := buildNotifySenders
 	origSend := sendNotifyAll
 	t.Cleanup(func() {
@@ -94,7 +91,6 @@ func TestRunNotifyTestAllFailures(t *testing.T) {
 }
 
 func TestRunNotifyReturnsConfigError(t *testing.T) {
-	t.Parallel()
 	prevNotifyTest := notifyTest
 	prevCfgPath := cfgPath
 	notifyTest = true
