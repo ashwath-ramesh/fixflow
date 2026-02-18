@@ -330,6 +330,7 @@ Prompt templates support these placeholders:
 | `{{body}}` | Issue body (sanitized) |
 | `{{plan}}` | Plan artifact content |
 | `{{review_feedback}}` | Previous review + test output |
+| `{{human_notes}}` | Human guidance from `ap retry -n` (plan step only) |
 
 ## Health Check
 

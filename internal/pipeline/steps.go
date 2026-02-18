@@ -23,6 +23,8 @@ Title: {{title}}
 {{body}}
 </issue>
 
+{{human_notes}}
+
 Create a step-by-step implementation plan that includes:
 1. Which files need to be modified or created
 2. The specific changes needed in each file
@@ -87,9 +89,15 @@ func (r *Runner) runPlan(ctx context.Context, jobID string, issue db.Issue, proj
 		}
 	}
 
+	humanNotes := ""
+	if job.HumanNotes != "" {
+		humanNotes = fmt.Sprintf("<human_notes>\n%s\n</human_notes>", job.HumanNotes)
+	}
+
 	prompt := BuildPrompt(template, map[string]string{
-		"title": issue.Title,
-		"body":  SanitizeIssueContent(issue.Body),
+		"title":       issue.Title,
+		"body":        SanitizeIssueContent(issue.Body),
+		"human_notes": humanNotes,
 	})
 
 	resp, err := r.invokeProvider(ctx, jobID, "plan", job.Iteration, workDir, prompt)
