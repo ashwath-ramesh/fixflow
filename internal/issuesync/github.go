@@ -31,15 +31,7 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 		return err
 	}
 
-	params := url.Values{
-		"state":     {"open"},
-		"per_page":  {"100"},
-		"sort":      {"updated"},
-		"direction": {"asc"},
-	}
-	if cursor != "" {
-		params.Set("since", cursor)
-	}
+	params := githubIssueQueryParams(cursor)
 
 	nextURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues?%s", owner, repo, params.Encode())
 	token := s.cfg.Tokens.GitHub
@@ -103,6 +95,20 @@ func (s *Syncer) syncGitHub(ctx context.Context, p *config.ProjectConfig) error 
 	return nil
 }
 
+func githubIssueQueryParams(cursor string) url.Values {
+	params := url.Values{
+		"state":     {"open"},
+		"per_page":  {"100"},
+		"sort":      {"updated"},
+		"direction": {"asc"},
+	}
+	if cursor != "" {
+		params.Set("state", "all")
+		params.Set("since", cursor)
+	}
+	return params
+}
+
 func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, issues []githubIssue) string {
 	includeLabels := []string(nil)
 	if p.GitHub != nil {
@@ -128,15 +134,20 @@ func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, 
 
 		eligibility := evaluateGitHubIssueEligibility(includeLabels, labels, time.Now().UTC())
 		eligible := eligibility.Eligible
+		state := "open"
+		if issue.State == "closed" {
+			state = "closed"
+		}
+		sourceIssueID := fmt.Sprintf("%d", issue.Number)
 
 		ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
 			ProjectName:   p.Name,
 			Source:        "github",
-			SourceIssueID: fmt.Sprintf("%d", issue.Number),
+			SourceIssueID: sourceIssueID,
 			Title:         issue.Title,
 			Body:          issue.Body,
 			URL:           issue.HTMLURL,
-			State:         "open",
+			State:         state,
 			Labels:        labels,
 			Eligible:      &eligible,
 			SkipReason:    eligibility.SkipReason,
@@ -145,6 +156,12 @@ func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, 
 		})
 		if err != nil {
 			slog.Error("sync: upsert github issue", "number", issue.Number, "err", err)
+			continue
+		}
+
+		if state == "closed" {
+			s.cancelJobsForClosedIssue(ctx, p.Name, "github", sourceIssueID, ffid)
+			latestUpdated = issue.UpdatedAt
 			continue
 		}
 

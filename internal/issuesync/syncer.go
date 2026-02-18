@@ -280,3 +280,31 @@ func normalizeGitLabBaseURL(baseURL string) string {
 	}
 	return strings.TrimRight(baseURL, "/")
 }
+
+func (s *Syncer) cancelJobsForClosedIssue(ctx context.Context, projectName, source, sourceIssueID, autoprIssueID string) {
+	cancelledIDs, err := s.store.CancelCancellableJobsForIssue(ctx, autoprIssueID, db.CancelReasonSourceIssueClosed)
+	if err != nil {
+		slog.Error("sync: cancel jobs for closed issue",
+			"project", projectName,
+			"source", source,
+			"issue", sourceIssueID,
+			"err", err)
+		return
+	}
+	for _, jobID := range cancelledIDs {
+		if err := s.store.MarkRunningSessionsCancelled(ctx, jobID); err != nil {
+			slog.Warn("sync: mark running sessions cancelled",
+				"project", projectName,
+				"source", source,
+				"issue", sourceIssueID,
+				"job", jobID,
+				"err", err)
+		}
+		slog.Info("sync: cancelled job for closed issue",
+			"project", projectName,
+			"source", source,
+			"issue", sourceIssueID,
+			"job", jobID,
+			"reason", db.CancelReasonSourceIssueClosed)
+	}
+}
