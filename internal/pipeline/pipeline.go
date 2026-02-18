@@ -318,6 +318,11 @@ func (r *Runner) maybeAutoPR(ctx context.Context, jobID string, issue db.Issue, 
 		return nil
 	}
 
+	// Push branch to remote before creating PR.
+	if err := git.PushBranch(ctx, job.WorktreePath, job.BranchName); err != nil {
+		return fmt.Errorf("push branch for auto-PR: %w", err)
+	}
+
 	slog.Info("auto_pr enabled, creating PR", "job", jobID)
 
 	prTitle, prBody := BuildPRContent(ctx, r.store, job, issue)

@@ -231,14 +231,6 @@ func (r *Runner) runTests(ctx context.Context, jobID string, issue db.Issue, pro
 		return errTestsFailed
 	}
 
-	// Push branch.
-	if err := git.PushBranch(ctx, workDir, job.BranchName); err != nil {
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			return context.Canceled
-		}
-		slog.Warn("push failed", "err", err)
-	}
-
 	slog.Info("test step completed", "job", jobID)
 	return nil
 }

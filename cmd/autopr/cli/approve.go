@@ -61,6 +61,11 @@ func runApprove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load issue: %w", err)
 	}
 
+	// Push branch to remote before creating PR.
+	if err := git.PushBranch(cmd.Context(), job.WorktreePath, job.BranchName); err != nil {
+		return fmt.Errorf("push branch: %w", err)
+	}
+
 	prURL := job.PRURL
 	if prURL != "" {
 		// PR already created (e.g. by auto_pr), skip creation.

@@ -305,6 +305,11 @@ func (m Model) executeApprove() tea.Msg {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("load issue: %w", err)}
 	}
 
+	// Push branch to remote before creating PR.
+	if err := git.PushBranch(ctx, job.WorktreePath, job.BranchName); err != nil {
+		return actionResultMsg{action: "approve", err: fmt.Errorf("push branch: %w", err)}
+	}
+
 	prURL := job.PRURL
 	if prURL == "" {
 		proj, ok := m.cfg.ProjectByName(job.ProjectName)
