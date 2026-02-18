@@ -16,6 +16,7 @@ import (
 	"autopr/internal/db"
 	"autopr/internal/issuesync"
 	"autopr/internal/llm"
+	"autopr/internal/notify"
 	"autopr/internal/pipeline"
 	"autopr/internal/webhook"
 	"autopr/internal/worker"
@@ -119,6 +120,18 @@ func Run(cfg *config.Config, foreground bool) error {
 			syncer.RunLoop(ctx, syncInterval)
 		}()
 	}
+
+	// Notification dispatcher goroutine.
+	notificationDispatcher := notify.NewDispatcher(
+		store,
+		notify.BuildSenders(cfg.Notifications, nil),
+		cfg.Notifications.Triggers,
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		notificationDispatcher.Run(ctx)
+	}()
 
 	slog.Info("daemon started", "workers", cfg.Daemon.MaxWorkers, "webhook_port", cfg.Daemon.WebhookPort)
 

@@ -116,6 +116,13 @@ sync_interval = "5m"       # GitHub/Sentry polling interval
 [llm]
 provider = "codex"         # codex or claude
 
+[notifications]
+# webhook_url = "https://example.com/hook"               # generic JSON webhook
+# slack_webhook = "https://hooks.slack.com/services/..." # Slack incoming webhook
+# desktop = true                                          # macOS desktop notifications
+# triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
+# triggers = [] disables all notifications
+
 [[projects]]
 name = "my-project"
 repo_url = "git@github.com:org/repo.git"
@@ -161,6 +168,28 @@ log_file = "/custom/path/autopr.log"
 > scoped to the target repo. With read-only contents access, the daemon will work end-to-end but
 > branch push will fail — you'll need to push branches manually after approving jobs.
 
+### Notifications
+
+AutoPR emits notifications from a durable DB outbox when jobs hit key states:
+
+- `awaiting_approval` (job reached `ready`)
+- `failed`
+- `pr_created`
+- `pr_merged`
+
+Channels:
+
+- `notifications.webhook_url`: sends JSON payload (`event`, `job_id`, `state`, `issue_title`, `pr_url`, `project`, `timestamp`)
+- `notifications.slack_webhook`: sends Slack incoming webhook message
+- `notifications.desktop = true`: sends native macOS desktop notification (`osascript`)
+
+Test your setup:
+
+```bash
+ap notify --test
+ap notify --test --json
+```
+
 ## Setting Up a Project
 
 ### GitHub (polling)
@@ -204,6 +233,7 @@ log_file = "/custom/path/autopr.log"
 | `ap retry <job-id> [-n notes]` | Re-queue a failed/rejected/cancelled job |
 | `ap config` | Open config in `$EDITOR` |
 | `ap paths` | Show where files are stored |
+| `ap notify --test` | Send a test notification to configured channels |
 | `ap tui` | Interactive terminal dashboard |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
