@@ -59,7 +59,18 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer rows.Close()
 
-	counts := map[string]int{}
+	counts := map[string]int{
+		"queued":       0,
+		"planning":     0,
+		"implementing": 0,
+		"reviewing":    0,
+		"testing":      0,
+		"ready":        0,
+		"approved":     0,
+		"failed":       0,
+		"cancelled":    0,
+		"rejected":     0,
+	}
 	for rows.Next() {
 		var sc stateCount
 		if err := rows.Scan(&sc.State, &sc.Count); err != nil {
@@ -68,11 +79,33 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		counts[sc.State] = sc.Count
 	}
 
+	// Count merged separately (approved jobs with pr_merged_at set).
+	var merged int
+	_ = store.Reader.QueryRowContext(cmd.Context(),
+		`SELECT COUNT(*) FROM jobs WHERE state = 'approved' AND pr_merged_at IS NOT NULL AND pr_merged_at != ''`).Scan(&merged)
+	prCreated := counts["approved"] - merged
+	if prCreated < 0 {
+		prCreated = 0
+	}
+	jobCounts := map[string]int{
+		"queued":       counts["queued"],
+		"planning":     counts["planning"],
+		"implementing": counts["implementing"],
+		"reviewing":    counts["reviewing"],
+		"testing":      counts["testing"],
+		"needs_pr":     counts["ready"],
+		"failed":       counts["failed"],
+		"cancelled":    counts["cancelled"],
+		"rejected":     counts["rejected"],
+		"pr_created":   prCreated,
+		"merged":       merged,
+	}
+
 	if jsonOut {
 		printJSON(map[string]any{
 			"running":    running,
 			"pid":        pidStr,
-			"job_counts": counts,
+			"job_counts": jobCounts,
 		})
 		return nil
 	}
@@ -82,12 +115,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Println("Daemon: stopped")
 	}
-	// Count merged separately (approved jobs with pr_merged_at set).
-	var merged int
-	_ = store.Reader.QueryRowContext(cmd.Context(),
-		`SELECT COUNT(*) FROM jobs WHERE state = 'approved' AND pr_merged_at IS NOT NULL AND pr_merged_at != ''`).Scan(&merged)
-	prCreated := counts["approved"] - merged
-
 	fmt.Printf("Jobs: queued=%d planning=%d implementing=%d reviewing=%d testing=%d needs_pr=%d failed=%d cancelled=%d pr_created=%d merged=%d rejected=%d\n",
 		counts["queued"], counts["planning"], counts["implementing"], counts["reviewing"],
 		counts["testing"], counts["ready"], counts["failed"], counts["cancelled"], prCreated, merged, counts["rejected"])
