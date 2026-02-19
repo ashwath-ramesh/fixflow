@@ -1171,7 +1171,7 @@ func (m Model) enterRebaseView() Model {
 
 // enterMergedView enters Level 3 to display the PR merge details.
 func (m Model) enterMergedView() Model {
-	content := fmt.Sprintf("Pull request was merged.\n\n**Merged at:** %s\n\n**PR:** %s", formatTimestamp(m.selected.PRMergedAt), m.selected.PRURL)
+	content := fmt.Sprintf("Pull request was merged.\n\n**Merged at:** %s\n\n**PR:** %s", formatTimestampLocal(m.selected.PRMergedAt, "2006-01-02 15:04:05"), m.selected.PRURL)
 	m.selectedSession = &db.LLMSession{
 		Step:         "merged",
 		LLMProvider:  "-",
@@ -1206,7 +1206,7 @@ func (m Model) enterPRView() Model {
 
 // enterPRClosedView enters Level 3 to display the PR closed details.
 func (m Model) enterPRClosedView() Model {
-	content := fmt.Sprintf("Pull request was closed without merging.\n\n**Closed at:** %s\n\n**PR:** %s", formatTimestamp(m.selected.PRClosedAt), m.selected.PRURL)
+	content := fmt.Sprintf("Pull request was closed without merging.\n\n**Closed at:** %s\n\n**PR:** %s", formatTimestampLocal(m.selected.PRClosedAt, "2006-01-02 15:04:05"), m.selected.PRURL)
 	m.selectedSession = &db.LLMSession{
 		Step:         "pr closed",
 		LLMProvider:  "-",
@@ -1374,7 +1374,7 @@ func (m Model) listView() string {
 
 			title := truncate(job.IssueTitle, colIssue-2)
 
-			updated := formatTimestamp(job.UpdatedAt)
+			updated := formatTimestampLocal(job.UpdatedAt, "15:04:05")
 
 			line := cursor +
 				padRight(db.ShortID(job.ID), colJob) +
@@ -1469,10 +1469,10 @@ func (m Model) detailView() string {
 		kv("Commit", job.CommitSHA[:min(12, len(job.CommitSHA))])
 	}
 	if job.PRMergedAt != "" {
-		kv("Merged", stateStyle["merged"].Render(formatTimestamp(job.PRMergedAt)))
+		kv("Merged", stateStyle["merged"].Render(formatTimestampLocal(job.PRMergedAt, "2006-01-02 15:04:05")))
 	}
 	if job.PRClosedAt != "" {
-		kv("PR Closed", stateStyle["pr closed"].Render(formatTimestamp(job.PRClosedAt)))
+		kv("PR Closed", stateStyle["pr closed"].Render(formatTimestampLocal(job.PRClosedAt, "2006-01-02 15:04:05")))
 	}
 	if job.ErrorMessage != "" {
 		kv("Error", lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(job.ErrorMessage))
@@ -2088,6 +2088,18 @@ func formatDuration(durationMS int) string {
 		durationMS = 0
 	}
 	return fmt.Sprintf("%ds", durationMS/1000)
+}
+
+func formatTimestampLocal(ts, layout string) string {
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return ""
+	}
+	t, ok := parseTimestamp(ts)
+	if !ok {
+		return ts
+	}
+	return t.In(time.Local).Format(layout)
 }
 
 func parseTimestamp(ts string) (time.Time, bool) {
