@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,11 +51,11 @@ func TestListViewShowsFilterIndicatorAndFooterHints(t *testing.T) {
 			},
 		},
 		jobs:          jobs,
-		allJobsCounts:  jobs,
-		filterState:    "ready",
-		filterProject:  "autopr",
-		filterMode:     false,
-		cursor:         0,
+		allJobsCounts: jobs,
+		filterState:   "ready",
+		filterProject: "autopr",
+		filterMode:    false,
+		cursor:        0,
 	}
 
 	view := m.listView()
@@ -321,6 +322,60 @@ func newTestModelWithQueuedJob(t *testing.T, tmp string) (Model, *db.Store, stri
 	return m, store, jobID
 }
 
+type jobSeed struct {
+	state   string
+	project string
+}
+
+func newTestModelWithJobs(t *testing.T, tmp string, seeds []jobSeed) (Model, *db.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	store, err := db.Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	for i, seed := range seeds {
+		issueID, err := store.UpsertIssue(ctx, db.IssueUpsert{
+			ProjectName:   seed.project,
+			Source:        "github",
+			SourceIssueID: fmt.Sprintf("issue-%d", i+1),
+			Title:         fmt.Sprintf("issue %d", i+1),
+			URL:           fmt.Sprintf("https://github.com/org/repo/issues/%d", i+1),
+			State:         "open",
+		})
+		if err != nil {
+			t.Fatalf("upsert issue %d: %v", i+1, err)
+		}
+		jobID, err := store.CreateJob(ctx, issueID, seed.project, 3)
+		if err != nil {
+			t.Fatalf("create job %d: %v", i+1, err)
+		}
+		if _, err := store.Writer.ExecContext(ctx, `
+			UPDATE jobs
+			SET state = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+			WHERE id = ?`, seed.state, jobID); err != nil {
+			t.Fatalf("configure job %d state %q: %v", i+1, seed.state, err)
+		}
+	}
+
+	cfg := &config.Config{
+		Daemon: config.DaemonConfig{
+			PIDFile:      filepath.Join(tmp, "autopr.pid"),
+			SyncInterval: "5m",
+			MaxWorkers:   1,
+		},
+	}
+	m := NewModel(store, cfg)
+	jobs, err := store.ListJobs(ctx, "", "all")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	m.jobs = jobs
+	return m, store
+}
+
 func newTestModelForFilterCycle(jobs []db.Job) Model {
 	return Model{
 		cfg: &config.Config{
@@ -377,6 +432,7 @@ func TestFilterModeEscCancelsPendingChanges(t *testing.T) {
 	})
 	m.filterState = "ready"
 	m.filterProject = "proj-a"
+	m.cursor = 1
 
 	modelAny, _ := m.handleKey(keyRunes('f'))
 	m = modelAny.(Model)
@@ -391,13 +447,49 @@ func TestFilterModeEscCancelsPendingChanges(t *testing.T) {
 		t.Fatalf("expected project filter change")
 	}
 
-	modelAny, _ = m.handleKey(keyRunes('esc'))
+	modelAny, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	m = modelAny.(Model)
 	if m.filterMode {
 		t.Fatalf("expected filter mode to exit on esc")
 	}
 	if m.filterState != "ready" || m.filterProject != "proj-a" {
 		t.Fatalf("expected filters to rollback to ready/proj-a, got state=%q project=%q", m.filterState, m.filterProject)
+	}
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor to restore to prior position, got %d", m.cursor)
+	}
+}
+
+func TestFilterModeEscRestoresCursor(t *testing.T) {
+	t.Parallel()
+	m := newTestModelForFilterCycle([]db.Job{
+		{ID: "ap-job-1", ProjectName: "proj-b", State: "queued"},
+		{ID: "ap-job-2", ProjectName: "proj-a", State: "ready"},
+	})
+	m.filterState = "ready"
+	m.filterProject = "proj-a"
+	m.cursor = 1
+
+	modelAny, _ := m.handleKey(keyRunes('f'))
+	m = modelAny.(Model)
+	modelAny, _ = m.handleKey(keyRunes('s'))
+	m = modelAny.(Model)
+	modelAny, _ = m.handleKey(keyRunes('p'))
+	m = modelAny.(Model)
+	if m.filterState == "ready" || m.filterProject == "proj-a" {
+		t.Fatalf("expected draft changes after s/p cycling")
+	}
+
+	modelAny, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = modelAny.(Model)
+	if m.filterMode {
+		t.Fatalf("expected filter mode to exit on esc")
+	}
+	if m.filterState != "ready" || m.filterProject != "proj-a" {
+		t.Fatalf("expected pending changes to rollback to ready/proj-a, got state=%q project=%q", m.filterState, m.filterProject)
+	}
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor restore to prior position, got %d", m.cursor)
 	}
 
 }
@@ -430,6 +522,7 @@ func TestFilterModeEscWithoutApplying(t *testing.T) {
 	})
 	m.filterState = "ready"
 	m.filterProject = "proj-a"
+	m.cursor = 1
 	modelAny, _ := m.handleKey(keyRunes('f'))
 	m = modelAny.(Model)
 	modelAny, _ = m.handleKey(keyRunes('s'))
@@ -437,7 +530,7 @@ func TestFilterModeEscWithoutApplying(t *testing.T) {
 	if m.filterState == "ready" {
 		t.Fatalf("expected draft filter change to happen before esc")
 	}
-	modelAny, _ = m.handleKey(keyRunes('esc'))
+	modelAny, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 	m = modelAny.(Model)
 	if m.filterMode {
 		t.Fatalf("expected filter mode to exit on esc")
@@ -445,8 +538,10 @@ func TestFilterModeEscWithoutApplying(t *testing.T) {
 	if m.filterState != "ready" || m.filterProject != "proj-a" {
 		t.Fatalf("expected pending changes not applied after esc, got state=%q project=%q", m.filterState, m.filterProject)
 	}
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor restore after filter cancel, got %d", m.cursor)
+	}
 }
-
 
 // transitionToReviewing moves a job from queued → planning → implementing → reviewing.
 func transitionToReviewing(t *testing.T, store *db.Store, jobID string) {
@@ -580,6 +675,48 @@ func TestManualRefreshInListViewStillWorks(t *testing.T) {
 	}
 }
 
+func TestManualRefreshHonorsActiveFilters(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store := newTestModelWithJobs(t, tmp, []jobSeed{
+		{state: "ready", project: "alpha"},
+		{state: "queued", project: "alpha"},
+		{state: "ready", project: "beta"},
+		{state: "queued", project: "beta"},
+		{state: "failed", project: "beta"},
+	})
+	defer store.Close()
+
+	m.filterState = "ready"
+	m.filterProject = "alpha"
+
+	_, cmd := m.handleKey(keyRunes('r'))
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch from manual refresh, got %T", msg)
+	}
+
+	var filtered []db.Job
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if msg := c(); msg != nil {
+			if v, ok := msg.(jobsMsg); ok {
+				filtered = append(filtered, v.filtered...)
+			}
+		}
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered job, got %d", len(filtered))
+	}
+	if filtered[0].State != "ready" || filtered[0].ProjectName != "alpha" {
+		t.Fatalf("expected filtered job to be ready/alpha, got %s/%s", filtered[0].State, filtered[0].ProjectName)
+	}
+}
+
 func TestManualRefreshInDetailViewStillWorks(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -591,6 +728,101 @@ func TestManualRefreshInDetailViewStillWorks(t *testing.T) {
 	_, cmd := m.handleKey(keyRunes('r'))
 	if got, want := batchCmdCount(t, cmd), 3; got != want {
 		t.Fatalf("expected %d refresh commands in detail view, got %d", want, got)
+	}
+}
+
+func TestTickRefreshHonorsActiveFilters(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store := newTestModelWithJobs(t, tmp, []jobSeed{
+		{state: "ready", project: "alpha"},
+		{state: "queued", project: "alpha"},
+		{state: "ready", project: "beta"},
+		{state: "queued", project: "beta"},
+		{state: "failed", project: "beta"},
+	})
+	defer store.Close()
+
+	m.filterState = "ready"
+	m.filterProject = "alpha"
+
+	_, cmd := m.Update(tickMsg{})
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch from tick refresh, got %T", msg)
+	}
+
+	var filtered, unfiltered []db.Job
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		switch v := c().(type) {
+		case jobsMsg:
+			filtered = append(filtered, v.filtered...)
+			unfiltered = append(unfiltered, v.unfiltered...)
+		}
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered job, got %d", len(filtered))
+	}
+	if filtered[0].State != "ready" || filtered[0].ProjectName != "alpha" {
+		t.Fatalf("expected filtered job to be ready/alpha, got %s/%s", filtered[0].State, filtered[0].ProjectName)
+	}
+	if len(unfiltered) != 5 {
+		t.Fatalf("expected 5 unfiltered jobs, got %d", len(unfiltered))
+	}
+}
+
+func TestFilteredRefreshPreservesUnfilteredCounters(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store := newTestModelWithJobs(t, tmp, []jobSeed{
+		{state: "ready", project: "alpha"},
+		{state: "queued", project: "alpha"},
+		{state: "ready", project: "beta"},
+		{state: "queued", project: "beta"},
+		{state: "failed", project: "beta"},
+	})
+	defer store.Close()
+
+	m.filterState = "ready"
+	m.filterProject = "alpha"
+
+	_, cmd := m.Update(tickMsg{})
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected batch from tick refresh, got %T", msg)
+	}
+
+	var jobsPayload jobsMsg
+	found := false
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if msg := c(); msg != nil {
+			if v, ok := msg.(jobsMsg); ok {
+				jobsPayload = v
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected jobs message in tick batch")
+	}
+	modelAny, _ := m.Update(jobsPayload)
+	m = modelAny.(Model)
+	counts := m.jobCounts()
+	if counts["ready"] != 2 {
+		t.Fatalf("expected unfiltered ready count 2, got %d", counts["ready"])
+	}
+	if counts["queued"] != 2 {
+		t.Fatalf("expected unfiltered queued count 2, got %d", counts["queued"])
 	}
 }
 

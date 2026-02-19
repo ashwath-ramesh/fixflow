@@ -94,18 +94,19 @@ type Model struct {
 	cfg   *config.Config
 
 	// Level 1: job list
-	jobs               []db.Job
-	allJobsCounts      []db.Job
-	issueSummary       db.IssueSyncSummary
-	cursor             int
-	daemonRunning      bool
-	filterState        string
-	filterProject      string
-	filterMode         bool
-	filterStateDraft   string
-	filterProjectDraft string
-	filterStateBefore  string
+	jobs                []db.Job
+	allJobsCounts       []db.Job
+	issueSummary        db.IssueSyncSummary
+	cursor              int
+	daemonRunning       bool
+	filterState         string
+	filterProject       string
+	filterMode          bool
+	filterStateDraft    string
+	filterProjectDraft  string
+	filterStateBefore   string
 	filterProjectBefore string
+	filterCursorBefore  int
 
 	// Level 2: job detail + session list
 	selected     *db.Job
@@ -148,7 +149,7 @@ func NewModel(store *db.Store, cfg *config.Config) Model {
 // ── Messages ────────────────────────────────────────────────────────────────
 
 type jobsMsg struct {
-	filtered  []db.Job
+	filtered   []db.Job
 	unfiltered []db.Job
 }
 type issueSummaryMsg db.IssueSyncSummary
@@ -669,6 +670,7 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 		m.filterProjectBefore = m.filterProject
 		m.filterStateDraft = m.filterState
 		m.filterProjectDraft = m.filterProject
+		m.filterCursorBefore = m.cursor
 	case "r":
 		return m, tea.Batch(m.fetchJobs, m.fetchIssueSummary)
 	case "F":
@@ -685,6 +687,12 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 			m.filterProject = m.filterProjectBefore
 			m.filterStateDraft = m.filterState
 			m.filterProjectDraft = m.filterProject
+			m.cursor = m.filterCursorBefore
+			if len(m.jobs) == 0 {
+				m.cursor = 0
+			} else if m.cursor >= len(m.jobs) {
+				m.cursor = len(m.jobs) - 1
+			}
 			return m, m.fetchJobs
 		}
 	case "up", "k":
@@ -729,6 +737,12 @@ func (m Model) handleKeyFilterMode(key string) (tea.Model, tea.Cmd) {
 		m.filterProject = m.filterProjectBefore
 		m.filterStateDraft = m.filterState
 		m.filterProjectDraft = m.filterProject
+		m.cursor = m.filterCursorBefore
+		if len(m.jobs) == 0 {
+			m.cursor = 0
+		} else if m.cursor >= len(m.jobs) {
+			m.cursor = len(m.jobs) - 1
+		}
 		return m, m.fetchJobs
 	case "f":
 		return m, nil

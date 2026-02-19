@@ -1877,6 +1877,7 @@ func TestListJobsSupportsProjectFilterAndActiveState(t *testing.T) {
 	planAlpha := createTestJobWithStateAndProject(t, ctx, store, "plan-1", "planning", "alpha")
 	implAlpha := createTestJobWithStateAndProject(t, ctx, store, "impl-1", "implementing", "alpha")
 	testBeta := createTestJobWithStateAndProject(t, ctx, store, "test-1", "testing", "beta")
+	reviewBeta := createTestJobWithStateAndProject(t, ctx, store, "review-1", "reviewing", "beta")
 	_ = createTestJobWithStateAndProject(t, ctx, store, "ready-1", "ready", "alpha")
 	_ = createTestJobWithStateAndProject(t, ctx, store, "other-1", "ready", "beta")
 
@@ -1884,14 +1885,14 @@ func TestListJobsSupportsProjectFilterAndActiveState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list active jobs: %v", err)
 	}
-	if len(active) != 3 {
-		t.Fatalf("expected 3 active jobs, got %d", len(active))
+	if len(active) != 4 {
+		t.Fatalf("expected 4 active jobs, got %d", len(active))
 	}
 	foundActive := map[string]bool{}
 	for _, j := range active {
 		foundActive[j.ID] = true
 	}
-	for _, want := range []string{planAlpha, implAlpha, testBeta} {
+	for _, want := range []string{planAlpha, implAlpha, testBeta, reviewBeta} {
 		if !foundActive[want] {
 			t.Fatalf("expected active filter to include job %q", want)
 		}
