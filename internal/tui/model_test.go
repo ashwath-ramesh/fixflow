@@ -71,7 +71,7 @@ func TestListViewShowsFilterIndicatorAndFooterHints(t *testing.T) {
 
 	m.filterMode = true
 	filterModeView := m.listView()
-	for _, want := range []string{"s state", "p project", "F clear filters", "esc cancel filter"} {
+	for _, want := range []string{"s state", "p project", "F clear all", "esc done"} {
 		if !strings.Contains(filterModeView, want) {
 			t.Fatalf("expected filter-mode hint %q, got:\n%s", want, filterModeView)
 		}
@@ -292,7 +292,7 @@ func TestListViewSortFooterHints(t *testing.T) {
 	if !strings.Contains(view, "s sort") {
 		t.Fatalf("expected footer hint for sort key, got:\n%s", view)
 	}
-	if !strings.Contains(view, "S toggle sort dir") {
+	if !strings.Contains(view, "S sort dir") {
 		t.Fatalf("expected footer hint for sort direction key, got:\n%s", view)
 	}
 }

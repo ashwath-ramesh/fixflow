@@ -1325,16 +1325,23 @@ func (m Model) listView() string {
 		pageLabel = 0
 		pageNum = 0
 	}
-	hints := []string{fmt.Sprintf("Page %d/%d (%d jobs)", pageNum, pageLabel, len(m.jobs)), "j/k navigate", "enter details", "f filter"}
-	if m.cursor < len(m.jobs) && db.IsCancellableState(m.jobs[m.cursor].State) {
-		hints = append(hints, "c cancel")
-	}
-	hints = append(hints, "F clear filters", "s sort", "S toggle sort dir")
 	if m.filterMode {
-		hints = append(hints, "s state", "p project", "esc cancel filter")
+		// Filter mode: show only filter controls (navigation is disabled).
+		filterHints := []string{"FILTER:", "s state", "p project", "F clear all", "esc done", "q quit"}
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(strings.Join(filterHints, "  ")))
+	} else {
+		// Normal mode: primary nav line + secondary actions line.
+		line1 := []string{fmt.Sprintf("Page %d/%d (%d jobs)", pageNum, pageLabel, len(m.jobs)), "j/k navigate", "enter details"}
+		if m.cursor < len(m.jobs) && db.IsCancellableState(m.jobs[m.cursor].State) {
+			line1 = append(line1, "c cancel")
+		}
+		line1 = append(line1, "r refresh", "q quit")
+		b.WriteString(dimStyle.Render(strings.Join(line1, "  ")))
+		b.WriteString("\n")
+
+		line2 := []string{"f filter", "F clear filters", "s sort", "S sort dir"}
+		b.WriteString(dimStyle.Render(strings.Join(line2, "  ")))
 	}
-	hints = append(hints, "r refresh", "q quit")
-	b.WriteString(dimStyle.Render(strings.Join(hints, "  ")))
 	return b.String()
 }
 
