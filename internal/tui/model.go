@@ -842,7 +842,7 @@ func (m Model) enterTestView() Model {
 
 // enterMergedView enters Level 3 to display the PR merge details.
 func (m Model) enterMergedView() Model {
-	content := fmt.Sprintf("Pull request was merged.\n\n**Merged at:** %s\n\n**PR:** %s", m.selected.PRMergedAt, m.selected.PRURL)
+	content := fmt.Sprintf("Pull request was merged.\n\n**Merged at:** %s\n\n**PR:** %s", formatTimestamp(m.selected.PRMergedAt), m.selected.PRURL)
 	m.selectedSession = &db.LLMSession{
 		Step:         "merged",
 		LLMProvider:  "-",
@@ -877,7 +877,7 @@ func (m Model) enterPRView() Model {
 
 // enterPRClosedView enters Level 3 to display the PR closed details.
 func (m Model) enterPRClosedView() Model {
-	content := fmt.Sprintf("Pull request was closed without merging.\n\n**Closed at:** %s\n\n**PR:** %s", m.selected.PRClosedAt, m.selected.PRURL)
+	content := fmt.Sprintf("Pull request was closed without merging.\n\n**Closed at:** %s\n\n**PR:** %s", formatTimestamp(m.selected.PRClosedAt), m.selected.PRURL)
 	m.selectedSession = &db.LLMSession{
 		Step:         "pr closed",
 		LLMProvider:  "-",
@@ -1010,10 +1010,7 @@ func (m Model) listView() string {
 
 			title := truncate(job.IssueTitle, colIssue-2)
 
-			updated := job.UpdatedAt
-			if len(updated) > 11 {
-				updated = updated[11:]
-			}
+			updated := formatTimestamp(job.UpdatedAt)
 
 			line := cursor +
 				padRight(db.ShortID(job.ID), colJob) +
@@ -1090,10 +1087,10 @@ func (m Model) detailView() string {
 		kv("Commit", job.CommitSHA[:min(12, len(job.CommitSHA))])
 	}
 	if job.PRMergedAt != "" {
-		kv("Merged", stateStyle["merged"].Render(job.PRMergedAt))
+		kv("Merged", stateStyle["merged"].Render(formatTimestamp(job.PRMergedAt)))
 	}
 	if job.PRClosedAt != "" {
-		kv("PR Closed", stateStyle["pr closed"].Render(job.PRClosedAt))
+		kv("PR Closed", stateStyle["pr closed"].Render(formatTimestamp(job.PRClosedAt)))
 	}
 	if job.ErrorMessage != "" {
 		kv("Error", lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(job.ErrorMessage))
@@ -1138,7 +1135,7 @@ func (m Model) detailView() string {
 		sColStatus   = 12
 		sColProvider = 10
 		sColTokens   = 16
-		sColStart    = 10
+		sColStart    = 20
 		sColDuration = 10
 	)
 
@@ -1170,7 +1167,7 @@ func (m Model) detailView() string {
 
 			stepDisplay := db.DisplayStep(s.Step)
 			tokens := fmt.Sprintf("%d/%d", s.InputTokens, s.OutputTokens)
-			start := tableStart(s.CreatedAt)
+			start := formatTimestamp(s.CreatedAt)
 			dur := formatDuration(s.DurationMS)
 
 			line := cursor +
@@ -1209,7 +1206,7 @@ func (m Model) detailView() string {
 				sst.Render(padRight(status, sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(tableStart(m.testArtifact.CreatedAt), sColStart)) +
+				dimStyle.Render(padRight(formatTimestamp(m.testArtifact.CreatedAt), sColStart)) +
 				dimStyle.Render(padRight("-", sColDuration))
 
 			if testIdx == m.sessCursor {
@@ -1236,7 +1233,7 @@ func (m Model) detailView() string {
 				sessStatusStyle["completed"].Render(padRight("completed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(tableStart(job.CompletedAt), sColStart)) +
+				dimStyle.Render(padRight(formatTimestamp(job.CompletedAt), sColStart)) +
 				dimStyle.Render(padRight("-", sColDuration))
 
 			if prIdx == m.sessCursor {
@@ -1266,7 +1263,7 @@ func (m Model) detailView() string {
 				stateStyle["merged"].Render(padRight("completed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(tableStart(job.PRMergedAt), sColStart)) +
+				dimStyle.Render(padRight(formatTimestamp(job.PRMergedAt), sColStart)) +
 				dimStyle.Render(padRight("-", sColDuration))
 
 			if mergedIdx == m.sessCursor {
@@ -1299,7 +1296,7 @@ func (m Model) detailView() string {
 				stateStyle["pr closed"].Render(padRight("closed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(tableStart(job.PRClosedAt), sColStart)) +
+				dimStyle.Render(padRight(formatTimestamp(job.PRClosedAt), sColStart)) +
 				dimStyle.Render(padRight("-", sColDuration))
 
 			if closedIdx == m.sessCursor {
@@ -1410,7 +1407,7 @@ func (m Model) sessionView() string {
 	kv("Status", sst.Render(sess.Status))
 	kv("Provider", sess.LLMProvider)
 	kv("Tokens", fmt.Sprintf("%d in / %d out", sess.InputTokens, sess.OutputTokens))
-	kv("Start Time", detailStart(sess.CreatedAt))
+	kv("Start Time", formatTimestamp(sess.CreatedAt))
 	kv("Duration", formatDuration(sess.DurationMS))
 	if sess.ErrorMessage != "" {
 		kv("Error", lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(sess.ErrorMessage))
@@ -1603,22 +1600,13 @@ func parseTimestamp(ts string) (time.Time, bool) {
 	return t.UTC(), true
 }
 
-func tableStart(ts string) string {
-	t, ok := parseTimestamp(ts)
-	if !ok {
-		return "-"
-	}
-	return t.Format("15:04:05")
-}
-
-func detailStart(ts string) string {
+func formatTimestamp(ts string) string {
 	t, ok := parseTimestamp(ts)
 	if !ok {
 		return "-"
 	}
 	return t.Format("2006-01-02 15:04:05")
 }
-
 
 func truncate(s string, max int) string {
 	if len(s) <= max {

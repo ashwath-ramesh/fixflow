@@ -585,20 +585,35 @@ func TestStartTimeFormattingHelpers(t *testing.T) {
 	t.Parallel()
 
 	const ts = "2025-02-19T14:32:05Z"
-	if got, want := tableStart(ts), "14:32:05"; got != want {
-		t.Fatalf("tableStart() = %q, want %q", got, want)
+	if got, want := formatTimestamp(ts), "2025-02-19 14:32:05"; got != want {
+		t.Fatalf("formatTimestamp() = %q, want %q", got, want)
 	}
-	if got, want := detailStart(ts), "2025-02-19 14:32:05"; got != want {
-		t.Fatalf("detailStart() = %q, want %q", got, want)
+	if got, want := formatTimestamp(""), "-"; got != want {
+		t.Fatalf("formatTimestamp(empty) = %q, want %q", got, want)
 	}
-	if got, want := tableStart(""), "-"; got != want {
-		t.Fatalf("tableStart(empty) = %q, want %q", got, want)
-	}
-	if got, want := detailStart("bad-time"), "-"; got != want {
-		t.Fatalf("detailStart(bad) = %q, want %q", got, want)
+	if got, want := formatTimestamp("bad-time"), "-"; got != want {
+		t.Fatalf("formatTimestamp(bad) = %q, want %q", got, want)
 	}
 	if got, want := formatDuration(9100), "9s"; got != want {
 		t.Fatalf("formatDuration() = %q, want %q", got, want)
+	}
+}
+
+func TestListViewUpdatedTimestampUsesYYYYMMDDHHMMSS(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:        "ap-job-1234",
+		State:     "implementing",
+		UpdatedAt: "2025-02-19T14:04:05Z",
+	}
+	m := Model{
+		jobs: []db.Job{job},
+	}
+
+	view := m.listView()
+	if !strings.Contains(view, "2025-02-19 14:04:05") {
+		t.Fatalf("expected formatted updated timestamp in list view, got:\n%s", view)
 	}
 }
 
@@ -680,7 +695,7 @@ func TestDetailViewPipelineShowsStartTimesForRows(t *testing.T) {
 	}
 
 	view := m.detailView()
-	for _, want := range []string{"14:01:02", "14:02:03", "14:03:04", "14:04:05", "14:05:06"} {
+	for _, want := range []string{"2025-02-19 14:01:02", "2025-02-19 14:02:03", "2025-02-19 14:03:04", "2025-02-19 14:04:05", "2025-02-19 14:05:06"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected pipeline view to contain start time %q:\n%s", want, view)
 		}
@@ -748,9 +763,15 @@ func TestSyntheticSessionViewsCarryStartTimes(t *testing.T) {
 	if got, want := mergedView.selectedSession.CreatedAt, "2025-02-19T14:04:05Z"; got != want {
 		t.Fatalf("merged view created_at = %q, want %q", got, want)
 	}
+	if !strings.Contains(mergedView.selectedSession.ResponseText, "2025-02-19 14:04:05") {
+		t.Fatalf("expected merged markdown to format PR merged timestamp, got:\n%s", mergedView.selectedSession.ResponseText)
+	}
 
 	closedView := base.enterPRClosedView()
 	if got, want := closedView.selectedSession.CreatedAt, "2025-02-19T14:05:06Z"; got != want {
 		t.Fatalf("pr closed view created_at = %q, want %q", got, want)
+	}
+	if !strings.Contains(closedView.selectedSession.ResponseText, "2025-02-19 14:05:06") {
+		t.Fatalf("expected pr-closed markdown to format PR closed timestamp, got:\n%s", closedView.selectedSession.ResponseText)
 	}
 }
