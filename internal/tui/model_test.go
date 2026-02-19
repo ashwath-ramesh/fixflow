@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -272,6 +273,25 @@ func keyRunes(r rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
 }
 
+func keyType(t tea.KeyType) tea.KeyMsg {
+	return tea.KeyMsg{Type: t}
+}
+
+func makeTestJobs(count int) []db.Job {
+	jobs := make([]db.Job, count)
+	for i := 0; i < count; i++ {
+		jobs[i] = db.Job{
+			ID:            fmt.Sprintf("ap-job-%03d", i),
+			State:         "queued",
+			ProjectName:   "proj",
+			IssueSource:   "github",
+			SourceIssueID: fmt.Sprintf("%03d", i+1),
+			IssueTitle:    "issue " + fmt.Sprint(i),
+		}
+	}
+	return jobs
+}
+
 func batchCmdCount(t *testing.T, cmd tea.Cmd) int {
 	t.Helper()
 	if cmd == nil {
@@ -410,18 +430,210 @@ func TestJobsMsgClampsCursorWhenListShrinks(t *testing.T) {
 	m, store, _ := newTestModelWithQueuedJob(t, tmp)
 	defer store.Close()
 
-	m.cursor = 5
-	modelAny, _ := m.Update(jobsMsg([]db.Job{{ID: "ap-job-one"}}))
+	m.pageSize = 10
+	m.page = 2
+	m.cursor = 25
+	modelAny, _ := m.Update(jobsMsg(makeTestJobs(31)))
 	m = modelAny.(Model)
-	if m.cursor != 0 {
-		t.Fatalf("expected cursor to clamp to 0, got %d", m.cursor)
+	if m.page != 2 {
+		t.Fatalf("expected page to stay 2, got %d", m.page)
+	}
+	if m.cursor != 25 {
+		t.Fatalf("expected cursor to stay 25, got %d", m.cursor)
 	}
 
+	modelAny, _ = m.Update(jobsMsg(makeTestJobs(12)))
+	m = modelAny.(Model)
+	if m.page != 1 {
+		t.Fatalf("expected page to clamp to 1, got %d", m.page)
+	}
+	if m.cursor != 11 {
+		t.Fatalf("expected cursor to clamp within last page, got %d", m.cursor)
+	}
+
+	m.page = 0
 	m.cursor = 2
 	modelAny, _ = m.Update(jobsMsg(nil))
 	m = modelAny.(Model)
+	if m.page != 0 {
+		t.Fatalf("expected page to reset to 0 for empty jobs list, got %d", m.page)
+	}
 	if m.cursor != 0 {
 		t.Fatalf("expected cursor to reset to 0 for empty jobs list, got %d", m.cursor)
+	}
+}
+
+func TestWindowSizeMsgSetsPageSize(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Daemon: config.DaemonConfig{
+		SyncInterval: "5m",
+		MaxWorkers:   1,
+	}}
+
+	m := NewModel(nil, cfg)
+	mAny, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = mAny.(Model)
+	if m.pageSize != 26 {
+		t.Fatalf("expected pageSize 26, got %d", m.pageSize)
+	}
+	if m.page != 0 {
+		t.Fatalf("expected page to stay 0, got %d", m.page)
+	}
+	if m.cursor != 0 {
+		t.Fatalf("expected cursor to stay 0, got %d", m.cursor)
+	}
+}
+
+func TestHandleKeyLevel1PaginationControls(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Daemon: config.DaemonConfig{
+		SyncInterval: "5m",
+		MaxWorkers:   1,
+	}}
+	m := Model{
+		cfg:      cfg,
+		jobs:     makeTestJobs(25),
+		pageSize: 10,
+	}
+
+	modelAny, _ := m.handleKey(keyRunes('n'))
+	m = modelAny.(Model)
+	if m.page != 1 || m.cursor != 10 {
+		t.Fatalf("expected page 1, cursor 10 after n; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('n'))
+	m = modelAny.(Model)
+	if m.page != 2 || m.cursor != 20 {
+		t.Fatalf("expected page 2, cursor 20 after second n; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyType(tea.KeyPgDown))
+	m = modelAny.(Model)
+	if m.page != 2 || m.cursor != 20 {
+		t.Fatalf("expected page clamp at 2 after extra pgdown; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('p'))
+	m = modelAny.(Model)
+	if m.page != 1 || m.cursor != 10 {
+		t.Fatalf("expected page 1, cursor 10 after p; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyType(tea.KeyPgUp))
+	m = modelAny.(Model)
+	if m.page != 0 || m.cursor != 0 {
+		t.Fatalf("expected page 0, cursor 0 after pgup; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('G'))
+	m = modelAny.(Model)
+	if m.page != 2 || m.cursor != 20 {
+		t.Fatalf("expected page 2, cursor 20 after G; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('k'))
+	m = modelAny.(Model)
+	if m.cursor != 19 {
+		t.Fatalf("expected cursor to wrap to end of page on k; got %d", m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('j'))
+	m = modelAny.(Model)
+	if m.cursor != 20 {
+		t.Fatalf("expected cursor to wrap to start of page on j; got %d", m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('g'))
+	m = modelAny.(Model)
+	if m.page != 0 || m.cursor != 0 {
+		t.Fatalf("expected page 0, cursor 0 after g; got page %d cursor %d", m.page, m.cursor)
+	}
+}
+
+func TestListViewShowsPaginationInfo(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Daemon: config.DaemonConfig{
+		SyncInterval: "5m",
+		MaxWorkers:   1,
+	}}
+	m := Model{
+		cfg:      cfg,
+		jobs:     makeTestJobs(25),
+		pageSize: 10,
+		page:     1,
+		cursor:   10,
+	}
+
+	view := m.listView()
+	if !strings.Contains(view, "Page 2/3 (25 jobs)") {
+		t.Fatalf("expected page indicator in list footer, got:\n%s", view)
+	}
+	if !strings.Contains(view, "ap-job-010") {
+		t.Fatalf("expected current page to render page-1 first row, got:\n%s", view)
+	}
+	if strings.Contains(view, "ap-job-000") {
+		t.Fatalf("expected previous page rows to be omitted, got:\n%s", view)
+	}
+}
+
+func TestListViewHandlesZeroAndOneJob(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Daemon: config.DaemonConfig{
+		SyncInterval: "5m",
+		MaxWorkers:   1,
+	}}
+	m := Model{cfg: cfg, pageSize: 10}
+
+	view := m.listView()
+	if !strings.Contains(view, "No jobs found. Waiting for issues...") {
+		t.Fatalf("expected no jobs message, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Page 0/0 (0 jobs)") {
+		t.Fatalf("expected empty pagination footer, got:\n%s", view)
+	}
+
+	m.jobs = makeTestJobs(1)
+	view = m.listView()
+	if !strings.Contains(view, "Page 1/1 (1 jobs)") {
+		t.Fatalf("expected one-job pagination footer, got:\n%s", view)
+	}
+	if !strings.Contains(view, "ap-job-000") {
+		t.Fatalf("expected single job row, got:\n%s", view)
+	}
+}
+
+func TestLevel1EnterAndCancelUseCurrentPageSelection(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Daemon: config.DaemonConfig{
+		SyncInterval: "5m",
+		MaxWorkers:   1,
+	}}
+	m := Model{
+		cfg:      cfg,
+		jobs:     makeTestJobs(15),
+		pageSize: 10,
+		page:     1,
+		cursor:   12,
+	}
+	wantID := m.jobs[12].ID
+
+	modelAny, cmd := m.handleKey(keyType(tea.KeyEnter))
+	m = modelAny.(Model)
+	if m.selected == nil || m.selected.ID != wantID {
+		t.Fatalf("expected selected job %s, got %#v", wantID, m.selected)
+	}
+	if cmd == nil {
+		t.Fatalf("expected command from enter key on list view")
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('c'))
+	m = modelAny.(Model)
+	if m.confirmAction != "cancel" {
+		t.Fatalf("expected cancel confirmation action, got %q", m.confirmAction)
+	}
+	if m.confirmJobID != wantID {
+		t.Fatalf("expected confirm job %s, got %q", wantID, m.confirmJobID)
 	}
 }
 
