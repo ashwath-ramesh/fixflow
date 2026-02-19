@@ -123,14 +123,14 @@ type NotificationsConfig struct {
 }
 
 const (
-	TriggerAwaitingApproval = "awaiting_approval"
-	TriggerFailed           = "failed"
-	TriggerPRCreated        = "pr_created"
-	TriggerPRMerged         = "pr_merged"
+	TriggerNeedsPR  = "needs_pr"
+	TriggerFailed   = "failed"
+	TriggerPRCreated = "pr_created"
+	TriggerPRMerged  = "pr_merged"
 )
 
 var defaultNotificationTriggers = []string{
-	TriggerAwaitingApproval,
+	TriggerNeedsPR,
 	TriggerFailed,
 	TriggerPRCreated,
 	TriggerPRMerged,
@@ -445,7 +445,7 @@ func normalizeTriggers(triggers []string) ([]string, error) {
 
 func isValidTrigger(trigger string) bool {
 	switch trigger {
-	case TriggerAwaitingApproval, TriggerFailed, TriggerPRCreated, TriggerPRMerged:
+	case TriggerNeedsPR, TriggerFailed, TriggerPRCreated, TriggerPRMerged:
 		return true
 	default:
 		return false

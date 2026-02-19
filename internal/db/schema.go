@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
 CREATE TABLE IF NOT EXISTS notification_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id     TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL CHECK(event_type IN ('awaiting_approval','failed','pr_created','pr_merged')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('needs_pr','failed','pr_created','pr_merged')),
     status     TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
     attempts   INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
     last_error TEXT NOT NULL DEFAULT '',
@@ -158,6 +158,10 @@ func (s *Store) createSchema() error {
 		ON jobs(autopr_issue_id)
 		WHERE state NOT IN ('approved', 'rejected', 'failed', 'cancelled')`); err != nil {
 		return fmt.Errorf("create active-job index: %w", err)
+	}
+
+	if err := s.migrateNotificationEventsNeedsPR(); err != nil {
+		return err
 	}
 
 	return nil
@@ -317,6 +321,65 @@ FROM llm_sessions`); err != nil {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit llm_sessions migration: %w", err)
+	}
+	return nil
+}
+
+// migrateNotificationEventsNeedsPR renames event_type 'awaiting_approval' → 'needs_pr'
+// and recreates the table with an updated CHECK constraint.
+func (s *Store) migrateNotificationEventsNeedsPR() error {
+	sqlText, err := s.tableSQL("notification_events")
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(sqlText, "'awaiting_approval'") {
+		return nil
+	}
+
+	tx, err := s.Writer.Begin()
+	if err != nil {
+		return fmt.Errorf("begin notification_events migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+CREATE TABLE notification_events_new (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK(event_type IN ('needs_pr','failed','pr_created','pr_merged')),
+    status     TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','sent','failed','skipped')),
+    attempts   INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+)`); err != nil {
+		return fmt.Errorf("create notification_events_new: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+INSERT INTO notification_events_new (id, job_id, event_type, status, attempts, last_error, created_at, updated_at)
+SELECT id, job_id,
+       CASE WHEN event_type = 'awaiting_approval' THEN 'needs_pr' ELSE event_type END,
+       status, attempts, last_error, created_at, updated_at
+FROM notification_events`); err != nil {
+		return fmt.Errorf("copy notification_events rows: %w", err)
+	}
+
+	if _, err := tx.Exec(`DROP TABLE notification_events`); err != nil {
+		return fmt.Errorf("drop notification_events: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE notification_events_new RENAME TO notification_events`); err != nil {
+		return fmt.Errorf("rename notification_events_new: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_status_created ON notification_events(status, created_at)`); err != nil {
+		return fmt.Errorf("create idx_notification_events_status_created: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_job ON notification_events(job_id)`); err != nil {
+		return fmt.Errorf("create idx_notification_events_job: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit notification_events migration: %w", err)
 	}
 	return nil
 }

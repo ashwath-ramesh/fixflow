@@ -66,7 +66,7 @@ func DisplayState(state, prMergedAt, prClosedAt string) string {
 	}
 	switch state {
 	case "ready":
-		return "awaiting approval"
+		return "needs pr"
 	case "approved":
 		return "pr created"
 	default:
@@ -195,7 +195,7 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 	var eventType string
 	switch to {
 	case "ready":
-		eventType = NotificationEventAwaitingApproval
+		eventType = NotificationEventNeedsPR
 	case "failed":
 		eventType = NotificationEventFailed
 	case "approved":

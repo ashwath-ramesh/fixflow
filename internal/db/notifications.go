@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	NotificationEventAwaitingApproval = "awaiting_approval"
-	NotificationEventFailed           = "failed"
-	NotificationEventPRCreated        = "pr_created"
-	NotificationEventPRMerged         = "pr_merged"
+	NotificationEventNeedsPR  = "needs_pr"
+	NotificationEventFailed   = "failed"
+	NotificationEventPRCreated = "pr_created"
+	NotificationEventPRMerged  = "pr_merged"
 )
 
 const (
@@ -254,7 +254,7 @@ WHERE status IN ('sent', 'skipped')
 
 func validateNotificationEventType(eventType string) error {
 	switch eventType {
-	case NotificationEventAwaitingApproval, NotificationEventFailed, NotificationEventPRCreated, NotificationEventPRMerged:
+	case NotificationEventNeedsPR, NotificationEventFailed, NotificationEventPRCreated, NotificationEventPRMerged:
 		return nil
 	default:
 		return fmt.Errorf("unsupported notification event type %q", eventType)

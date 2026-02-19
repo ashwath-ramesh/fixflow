@@ -92,8 +92,8 @@ func TestNotificationEventsEnqueuedOnStateChanges(t *testing.T) {
 	for _, event := range events {
 		counts[event.EventType]++
 	}
-	if counts[NotificationEventAwaitingApproval] != 1 {
-		t.Fatalf("expected 1 awaiting_approval event, got %d", counts[NotificationEventAwaitingApproval])
+	if counts[NotificationEventNeedsPR] != 1 {
+		t.Fatalf("expected 1 needs_pr event, got %d", counts[NotificationEventNeedsPR])
 	}
 	if counts[NotificationEventPRCreated] != 1 {
 		t.Fatalf("expected 1 pr_created event, got %d", counts[NotificationEventPRCreated])

@@ -8,14 +8,14 @@ import (
 )
 
 const (
-	TriggerAwaitingApproval = "awaiting_approval"
-	TriggerFailed           = "failed"
-	TriggerPRCreated        = "pr_created"
-	TriggerPRMerged         = "pr_merged"
+	TriggerNeedsPR  = "needs_pr"
+	TriggerFailed   = "failed"
+	TriggerPRCreated = "pr_created"
+	TriggerPRMerged  = "pr_merged"
 )
 
 var AllTriggers = []string{
-	TriggerAwaitingApproval,
+	TriggerNeedsPR,
 	TriggerFailed,
 	TriggerPRCreated,
 	TriggerPRMerged,
@@ -44,7 +44,7 @@ type ChannelResult struct {
 
 func IsValidTrigger(trigger string) bool {
 	switch trigger {
-	case TriggerAwaitingApproval, TriggerFailed, TriggerPRCreated, TriggerPRMerged:
+	case TriggerNeedsPR, TriggerFailed, TriggerPRCreated, TriggerPRMerged:
 		return true
 	default:
 		return false
@@ -73,8 +73,8 @@ func TriggerSet(triggers []string) map[string]struct{} {
 
 func EventState(event string) string {
 	switch event {
-	case TriggerAwaitingApproval:
-		return "awaiting approval"
+	case TriggerNeedsPR:
+		return "needs pr"
 	case TriggerPRCreated:
 		return "pr created"
 	case TriggerPRMerged:
@@ -86,8 +86,8 @@ func EventState(event string) string {
 
 func EventLabel(event string) string {
 	switch event {
-	case TriggerAwaitingApproval:
-		return "Awaiting Approval"
+	case TriggerNeedsPR:
+		return "Needs PR"
 	case TriggerPRCreated:
 		return "PR Created"
 	case TriggerPRMerged:
@@ -100,9 +100,9 @@ func EventLabel(event string) string {
 func TestPayload() Payload {
 	now := time.Now().UTC().Format(time.RFC3339)
 	return Payload{
-		Event:      TriggerAwaitingApproval,
+		Event:      TriggerNeedsPR,
 		JobID:      "ap-job-test",
-		State:      EventState(TriggerAwaitingApproval),
+		State:      EventState(TriggerNeedsPR),
 		IssueTitle: "Test notification from AutoPR",
 		PRURL:      "https://example.com/pr/123",
 		Project:    "autopr",

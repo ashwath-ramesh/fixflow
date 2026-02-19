@@ -157,7 +157,7 @@ provider = "codex"         # codex or claude
 # webhook_url = "https://example.com/hook"               # generic JSON webhook
 # slack_webhook = "https://hooks.slack.com/services/..." # Slack incoming webhook
 # desktop = true                                          # macOS desktop notifications
-# triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
+# triggers = ["needs_pr", "failed", "pr_created", "pr_merged"]
 # triggers = [] disables all notifications
 
 [[projects]]
@@ -209,7 +209,7 @@ log_file = "/custom/path/autopr.log"
 
 AutoPR emits notifications from a durable DB outbox when jobs hit key states:
 
-- `awaiting_approval` (job reached `ready`)
+- `needs_pr` (job reached `ready`)
 - `failed`
 - `pr_created`
 - `pr_merged`
