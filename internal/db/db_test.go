@@ -128,20 +128,90 @@ func TestJobStateTransitions(t *testing.T) {
 		t.Fatalf("expected planning state, got %s", job.State)
 	}
 
-	// Valid transition: planning -> implementing.
+	// Claim transition: queued -> planning, then pipeline step to implementing.
 	if err := store.TransitionState(ctx, jobID, "planning", "implementing"); err != nil {
 		t.Fatalf("transition planning->implementing: %v", err)
 	}
-
 	// Invalid transition: implementing -> ready (should fail).
 	if err := store.TransitionState(ctx, jobID, "implementing", "ready"); err == nil {
 		t.Fatalf("expected error for invalid transition")
 	}
-
-	// Valid transition: implementing -> reviewing.
 	if err := store.TransitionState(ctx, jobID, "implementing", "reviewing"); err != nil {
 		t.Fatalf("transition implementing->reviewing: %v", err)
 	}
+	if err := store.TransitionState(ctx, jobID, "reviewing", "testing"); err != nil {
+		t.Fatalf("transition reviewing->testing: %v", err)
+	}
+	if err := store.TransitionState(ctx, jobID, "testing", "ready"); err != nil {
+		t.Fatalf("transition testing->ready: %v", err)
+	}
+	if err := store.TransitionState(ctx, jobID, "ready", "approved"); err != nil {
+		t.Fatalf("transition ready->approved: %v", err)
+	}
+
+	// Invalid transition from terminal: approved -> planning (should fail).
+	if err := store.TransitionState(ctx, jobID, "approved", "planning"); err == nil {
+		t.Fatalf("expected error for invalid terminal transition")
+	}
+
+	rejectedID := createTestJobWithState(t, ctx, store, "transitions-rejected", "ready", "", "", "", "")
+	if err := store.TransitionState(ctx, rejectedID, "ready", "rejected"); err != nil {
+		t.Fatalf("transition ready->rejected: %v", err)
+	}
+	if err := store.TransitionState(ctx, rejectedID, "rejected", "queued"); err != nil {
+		t.Fatalf("transition rejected->queued: %v", err)
+	}
+
+	// Invalid transition: queued -> reviewing (should fail).
+	if err := store.TransitionState(ctx, rejectedID, "queued", "reviewing"); err == nil {
+		t.Fatalf("expected error for invalid queued transition")
+	}
+
+	// Valid failure retry path.
+	failedID := createTestJobWithState(t, ctx, store, "transitions-failed", "failed", "", "", "", "")
+	if err := store.TransitionState(ctx, failedID, "failed", "queued"); err != nil {
+		t.Fatalf("transition failed->queued: %v", err)
+	}
+}
+
+func TestValidTransitionsContract(t *testing.T) {
+	t.Parallel()
+	t.Run("edges", func(t *testing.T) {
+		expected := map[string][]string{
+			"queued":       {"planning", "cancelled"},
+			"planning":     {"implementing", "failed", "cancelled"},
+			"implementing": {"reviewing", "failed", "cancelled"},
+			"reviewing":    {"implementing", "testing", "failed", "cancelled"},
+			"testing":      {"ready", "implementing", "failed", "cancelled"},
+			"ready":        {"approved", "rejected"},
+			"failed":       {"queued"},
+			"rejected":     {"queued"},
+			"cancelled":    {"queued"},
+		}
+
+		if got, want := len(ValidTransitions), len(expected); got != want {
+			t.Fatalf("expected %d states, got %d", want, got)
+		}
+		for state, wantTransitions := range expected {
+			gotTransitions, ok := ValidTransitions[state]
+			if !ok {
+				t.Fatalf("missing transitions for %q", state)
+			}
+			if len(gotTransitions) != len(wantTransitions) {
+				t.Fatalf("state %q: expected %d transitions, got %d", state, len(wantTransitions), len(gotTransitions))
+			}
+			for i, wantTo := range wantTransitions {
+				if gotTransitions[i] != wantTo {
+					t.Fatalf("state %q: expected transition[%d]=%q, got %q", state, i, wantTo, gotTransitions[i])
+				}
+			}
+		}
+		for state := range ValidTransitions {
+			if _, ok := expected[state]; !ok {
+				t.Fatalf("unexpected transition state %q", state)
+			}
+		}
+	})
 }
 
 func TestHasActiveJobForIssue(t *testing.T) {

@@ -17,18 +17,44 @@ var ErrDuplicateActiveJob = errors.New("an active job already exists for this is
 
 const CancelReasonSourceIssueClosed = "source issue closed"
 
-// ValidTransitions defines the allowed state machine transitions.
-var ValidTransitions = map[string][]string{
-	"queued":       {"planning", "cancelled"},
-	"planning":     {"implementing", "failed", "cancelled"},
-	"implementing": {"reviewing", "failed", "cancelled"},
-	"reviewing":    {"implementing", "testing", "failed", "cancelled"},
-	"testing":      {"ready", "implementing", "failed", "cancelled"},
-	"ready":        {"approved", "rejected"},
-	"failed":       {"queued"},
-	"rejected":     {"queued"},
-	"cancelled":    {"queued"},
+func registerTransition(transitions map[string][]string, from string, to ...string) {
+	transitions[from] = append([]string(nil), to...)
 }
+
+// ValidTransitions defines the allowed state machine transitions.
+var ValidTransitions = func() map[string][]string {
+	transitions := map[string][]string{}
+
+	// planning phase
+	// queued: accepted by the system and waiting to be claimed; can enter planning or be cancelled.
+	registerTransition(transitions, "queued", "planning", "cancelled")
+	// planning: issue has an execution plan; can begin implementing, or terminally fail/cancel.
+	registerTransition(transitions, "planning", "implementing", "failed", "cancelled")
+
+	// implementation phase
+	// implementing: code is being written; can be reviewed, or move to terminal failed/cancelled states.
+	registerTransition(transitions, "implementing", "reviewing", "failed", "cancelled")
+
+	// review phase
+	// reviewing: code review is active; can request more implementation, pass to testing, or fail/cancel.
+	registerTransition(transitions, "reviewing", "implementing", "testing", "failed", "cancelled")
+
+	// testing phase
+	// testing: automated checks are running; can pass to ready, request implementing fixes, or fail/cancel.
+	registerTransition(transitions, "testing", "ready", "implementing", "failed", "cancelled")
+
+	// completion phase
+	// ready: implementation appears complete and awaits approval decision.
+	registerTransition(transitions, "ready", "approved", "rejected")
+	// failed: implementation failed and can be retried by returning to queue.
+	registerTransition(transitions, "failed", "queued")
+	// rejected: review outcome was not accepted; can be retried by returning to queue.
+	registerTransition(transitions, "rejected", "queued")
+	// cancelled: job execution was manually stopped; can be retried by returning to queue.
+	registerTransition(transitions, "cancelled", "queued")
+
+	return transitions
+}()
 
 // IsCancellableState reports whether a job can be cancelled.
 func IsCancellableState(state string) bool {
