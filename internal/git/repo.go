@@ -85,6 +85,16 @@ func PushBranchCaptured(ctx context.Context, dir, branchName string) error {
 	return runGitCaptured(ctx, dir, "push", "origin", branchName)
 }
 
+// DeleteRemoteBranch deletes a branch from origin in the given repository.
+// Callers decide whether a failure should be fatal.
+func DeleteRemoteBranch(ctx context.Context, dir, branchName string) error {
+	branchName = strings.TrimSpace(branchName)
+	if branchName == "" {
+		return fmt.Errorf("branch name is empty")
+	}
+	return runGit(ctx, dir, "push", "origin", "--delete", branchName)
+}
+
 func injectToken(repoURL, token string) string {
 	if token == "" {
 		return repoURL

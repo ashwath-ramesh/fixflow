@@ -77,6 +77,69 @@ func TestPushBranchCapturedIncludesStderrInError(t *testing.T) {
 	}
 }
 
+func TestDeleteRemoteBranchSuccess(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	remote := filepath.Join(tmp, "remote.git")
+	runGitCmd(t, "", "init", "--bare", remote)
+
+	repo := filepath.Join(tmp, "repo")
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "checkout", "-B", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGitCmd(t, repo, "add", "README.md")
+	runGitCmd(t, repo, "commit", "-m", "init")
+	runGitCmd(t, repo, "push", "origin", "main")
+	runGitCmd(t, repo, "checkout", "-b", "autopr/test-delete")
+	runGitCmd(t, repo, "push", "origin", "autopr/test-delete")
+
+	if err := DeleteRemoteBranch(ctx, repo, "autopr/test-delete"); err != nil {
+		t.Fatalf("delete remote branch: %v", err)
+	}
+
+	cmd := exec.Command("git", "ls-remote", "--heads", remote, "autopr/test-delete")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("ls-remote remote: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("expected branch to be deleted on remote, got: %s", strings.TrimSpace(string(out)))
+	}
+}
+
+func TestDeleteRemoteBranchFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	remote := filepath.Join(tmp, "remote.git")
+	runGitCmd(t, "", "init", "--bare", remote)
+
+	repo := filepath.Join(tmp, "repo")
+	runGitCmd(t, "", "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	runGitCmd(t, repo, "remote", "add", "origin", remote)
+	runGitCmd(t, repo, "checkout", "-B", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	runGitCmd(t, repo, "add", "README.md")
+	runGitCmd(t, repo, "commit", "-m", "init")
+	runGitCmd(t, repo, "push", "origin", "main")
+
+	if err := DeleteRemoteBranch(ctx, repo, "autopr/does-not-exist"); err == nil {
+		t.Fatalf("expected delete remote branch failure")
+	}
+}
+
 func runGitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

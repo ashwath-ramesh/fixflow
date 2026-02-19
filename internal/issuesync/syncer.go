@@ -23,6 +23,7 @@ type Syncer struct {
 	findGitLabMRByBranch func(ctx context.Context, token, baseURL, projectID, sourceBranch, state string) (string, error)
 	checkGitHubPRStatus  func(ctx context.Context, token, prURL string) (git.PRMergeStatus, error)
 	checkGitLabMRStatus  func(ctx context.Context, token, baseURL, mrURL string) (git.PRMergeStatus, error)
+	deleteRemoteBranch   func(ctx context.Context, dir, branchName string) error
 }
 
 func NewSyncer(cfg *config.Config, store *db.Store, jobCh chan<- string) *Syncer {
@@ -34,6 +35,7 @@ func NewSyncer(cfg *config.Config, store *db.Store, jobCh chan<- string) *Syncer
 		findGitLabMRByBranch: git.FindGitLabMRByBranch,
 		checkGitHubPRStatus:  git.CheckGitHubPRStatus,
 		checkGitLabMRStatus:  git.CheckGitLabMRStatus,
+		deleteRemoteBranch:   git.DeleteRemoteBranch,
 	}
 }
 
@@ -262,6 +264,12 @@ func (s *Syncer) checkAndApplyPRStatus(ctx context.Context, job db.Job, proj *co
 
 // cleanupWorktree removes the job's worktree directory and clears the DB field.
 func (s *Syncer) cleanupWorktree(ctx context.Context, job db.Job) {
+	branchName := strings.TrimSpace(job.BranchName)
+	if branchName != "" && job.WorktreePath != "" {
+		if err := s.deleteRemoteBranch(ctx, job.WorktreePath, branchName); err != nil {
+			slog.Warn("cleanup worktree: delete remote branch", "job", db.ShortID(job.ID), "branch", branchName, "err", err)
+		}
+	}
 	if job.WorktreePath == "" {
 		return
 	}
