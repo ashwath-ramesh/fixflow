@@ -380,7 +380,7 @@ test_cmd = "make test"
 	}
 
 	want := []string{
-		TriggerAwaitingApproval,
+		TriggerNeedsPR,
 		TriggerFailed,
 		TriggerPRCreated,
 		TriggerPRMerged,
@@ -428,7 +428,7 @@ func TestLoadFailsForInvalidNotificationTrigger(t *testing.T) {
 
 	content := `
 [notifications]
-triggers = ["awaiting_approval", "oops"]
+triggers = ["needs_pr", "oops"]
 
 [[projects]]
 name = "test"

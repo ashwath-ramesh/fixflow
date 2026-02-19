@@ -29,12 +29,12 @@ func TestDispatcherMarksEventSent(t *testing.T) {
 	defer store.Close()
 
 	jobID := createNotifyTestJob(t, ctx, store, "1000", "Fix notifications")
-	if _, err := store.EnqueueNotificationEvent(ctx, jobID, TriggerAwaitingApproval); err != nil {
+	if _, err := store.EnqueueNotificationEvent(ctx, jobID, TriggerNeedsPR); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	sender := &stubSender{name: "stub"}
-	dispatcher := NewDispatcher(store, []Sender{sender}, []string{TriggerAwaitingApproval})
+	dispatcher := NewDispatcher(store, []Sender{sender}, []string{TriggerNeedsPR})
 	processed, err := dispatcher.runOnce(ctx)
 	if err != nil {
 		t.Fatalf("run once: %v", err)
@@ -69,7 +69,7 @@ func TestDispatcherMarksDisabledTriggerSkipped(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	dispatcher := NewDispatcher(store, []Sender{&stubSender{name: "stub"}}, []string{TriggerAwaitingApproval})
+	dispatcher := NewDispatcher(store, []Sender{&stubSender{name: "stub"}}, []string{TriggerNeedsPR})
 	processed, err := dispatcher.runOnce(ctx)
 	if err != nil {
 		t.Fatalf("run once: %v", err)

@@ -385,7 +385,7 @@ flowchart TD
       implementing: 'LLM writes code changes based on the plan (or review feedback).',
       reviewing:    'LLM reviews its own code. May request changes or approve.',
       testing:      'Runs the project test command. Passes → ready, fails → back to implement.',
-      ready:        'All checks passed. Waiting for human approval (or auto_pr).',
+      ready:        'All checks passed. Needs PR creation (manual or auto_pr).',
       approved:     'PR created. Terminal state.',
       rejected:     'Human rejected the job. Retryable via ap retry.',
       failed:       'A pipeline step errored. Retryable via ap retry.',

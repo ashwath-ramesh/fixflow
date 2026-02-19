@@ -233,7 +233,7 @@ provider = "codex"              # codex|claude
 # webhook_url = "https://example.com/hook"                     # generic JSON webhook
 # slack_webhook = "https://hooks.slack.com/services/..."       # Slack incoming webhook
 # desktop = true                                                # macOS desktop notifications
-# triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
+# triggers = ["needs_pr", "failed", "pr_created", "pr_merged"]
 # Set triggers = [] to disable all notifications.
 
 # Issue gating: by default, only issues labeled "autopr" (GitHub/GitLab) or
