@@ -70,7 +70,7 @@ AutoPR needs a source of issues to work on. Configure at least one in `config.to
 - **GitLab** — add `[projects.gitlab]` with `project_id`. AutoPR polls for open issues (and accepts webhooks) and uses **labels** for gating. By default, only issues labeled `autopr` are processed, and `autopr-skip` skips processing.
 - **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues and uses **team assignment** for gating. By default, only issues assigned to the `#autopr` team are processed.
 
-> **Safe defaults:** AutoPR will not process any issues until you label them `autopr` (GitHub/GitLab) or assign them to the `#autopr` team (Sentry). This prevents accidentally flooding the job queue on first start. Set `include_labels = []` and optionally `exclude_labels = []`, or `assigned_team = ""` to opt out and process all issues.
+> **Safe defaults:** AutoPR will not process any issues until you label them `autopr` (GitHub/GitLab) or assign them to the `#autopr` team (Sentry). This prevents accidentally flooding the job queue on first start. Set `include_labels = []` in the relevant source block and `exclude_labels = []` in `[[projects]]`, or `assigned_team = ""`, to opt out and process all issues.
 
 See [Section 5](#5-setting-up-a-project) for full setup details.
 
@@ -165,13 +165,13 @@ name = "my-project"
 repo_url = "git@github.com:org/repo.git"
 test_cmd = "go test ./..."
 base_branch = "main"
+  # exclude_labels = ["autopr-skip"] # optional: issues with these labels are ignored
+  # exclude_labels = [] # optional: disable default skip label
 
   [projects.github]
   owner = "org"
   repo = "repo"
   # include_labels = ["autopr"] # optional: ANY match; empty means no include gate
-  # exclude_labels = ["autopr-skip"] # optional: issues with these labels are ignored
-  # exclude_labels = [] # optional: disable default skip label
 ```
 
 ### 4.1 File Locations
@@ -234,24 +234,24 @@ ap notify --test --json
 ### 5.1 GitHub (polling, label-gated)
 
 1. Add `[projects.github]` with `owner` and `repo`.
-2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]`).
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]` in `[projects.github]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]` in `[[projects]]`).
 3. Exclusion has precedence: if an issue matches both include and exclude labels, it is skipped.
 4. Add the `autopr` label to any GitHub issue you want AutoPR to work on.
 5. Matching is case-insensitive and uses ANY configured label.
 6. To use a different include label: set `include_labels = ["my-label"]`.
 7. To use different skip labels: set `exclude_labels = ["on-hold"]`.
-8. To process ALL open issues (opt-out): set `include_labels = []` and `exclude_labels = []`.
+8. To process ALL open issues (opt-out): set `include_labels = []` in `[projects.github]` and `exclude_labels = []` in `[[projects]]`.
 9. AutoPR polls for open issues every `sync_interval`.
 
 ### 5.2 GitLab (polling + webhook, label-gated)
 
 1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
-2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]`).
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]` in `[projects.gitlab]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]` in `[[projects]]`).
 3. Exclusion has precedence: if an issue matches both include and exclude labels, it is skipped.
 4. Add the `autopr` label to any GitLab issue you want AutoPR to work on.
 5. To use a different include label: set `include_labels = ["my-label"]`.
 6. To use different skip labels: set `exclude_labels = ["on-hold"]`.
-7. To process ALL open issues (opt-out): set `include_labels = []` and `exclude_labels = []`.
+7. To process ALL open issues (opt-out): set `include_labels = []` and `exclude_labels = []` (`include_labels` in `[projects.gitlab]`, `exclude_labels` in `[[projects]]`).
 8. GitLab webhooks still call the same gate rules used by the poller.
 9. Optionally add a webhook in GitLab (**Settings > Webhooks**) for instant processing:
    - **URL:** `http://<your-host>:9847/webhook`

@@ -137,15 +137,15 @@ var defaultNotificationTriggers = []string{
 }
 
 type ProjectConfig struct {
-	Name       string          `toml:"name"`
-	RepoURL    string          `toml:"repo_url"`
-	TestCmd    string          `toml:"test_cmd"`
-	BaseBranch string          `toml:"base_branch"`
-	ExcludeLabels []string     `toml:"exclude_labels"`
-	GitLab     *ProjectGitLab  `toml:"gitlab"`
-	GitHub     *ProjectGitHub  `toml:"github"`
-	Sentry     *ProjectSentry  `toml:"sentry"`
-	Prompts    *ProjectPrompts `toml:"prompts"`
+	Name          string          `toml:"name"`
+	RepoURL       string          `toml:"repo_url"`
+	TestCmd       string          `toml:"test_cmd"`
+	BaseBranch    string          `toml:"base_branch"`
+	ExcludeLabels []string        `toml:"exclude_labels"`
+	GitLab        *ProjectGitLab  `toml:"gitlab"`
+	GitHub        *ProjectGitHub  `toml:"github"`
+	Sentry        *ProjectSentry  `toml:"sentry"`
+	Prompts       *ProjectPrompts `toml:"prompts"`
 }
 
 type ProjectGitLab struct {
@@ -170,6 +170,10 @@ type ProjectSentry struct {
 // issue sources when include_labels is not configured. Set include_labels = []
 // in config to explicitly disable label gating.
 const DefaultIncludeLabel = "autopr"
+
+// DefaultExcludeLabel is the default issue skip gate used for GitHub and GitLab
+// sources when exclude_labels is not configured. Set exclude_labels = [] to
+// disable skip gating.
 const DefaultExcludeLabel = "autopr-skip"
 
 // DefaultAssignedTeam is the default Sentry team gate applied when

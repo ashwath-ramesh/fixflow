@@ -238,7 +238,8 @@ provider = "codex"              # codex|claude
 
 # Issue gating: by default, only issues labeled "autopr" (GitHub/GitLab) are
 # processed, and issues labeled "autopr-skip" are skipped. Exclusion has precedence.
-# Set include_labels = [] and exclude_labels = [] to disable label gating entirely.
+# Set include_labels = [] in [projects.*] and exclude_labels = [] in [[projects]]
+# to disable label gating entirely.
 # Sentry uses assigned_team = "autopr" and set assigned_team = "" to opt out.
 
 # --- GitHub example ---
@@ -247,16 +248,16 @@ name = "my-project"
 repo_url = "git@github.com:org/repo.git"
 test_cmd = "go test ./..."
 base_branch = "main"
+  # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
+  # exclude_labels = ["blocked"] # custom: skip issues labeled "blocked"
+  # exclude_labels = []          # opt-out: disable default skip label
 
   [projects.github]
   owner = "org"
   repo = "repo"
   # include_labels defaults to ["autopr"] -- label issues "autopr" to process them
-  # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
   # include_labels = ["bug"]    # custom: only process issues labeled "bug"
-  # exclude_labels = ["blocked"] # custom: skip issues labeled "blocked"
   # include_labels = []          # opt-out: process ALL open issues
-  # exclude_labels = []          # opt-out: disable default skip label
 
   # [projects.sentry]
   # org = "my-org"
@@ -277,13 +278,14 @@ base_branch = "main"
 # repo_url = "git@gitlab.com:org/repo.git"
 # test_cmd = "make test"
 # base_branch = "main"
+#   # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
+#   # exclude_labels = ["blocked"]     # custom: skip issues labeled "blocked"
+#   # exclude_labels = []             # opt-out: disable default skip label
 #
 #   [projects.gitlab]
 #   base_url = "https://gitlab.com"   # change for self-hosted GitLab
 #   project_id = "12345"
 #   # include_labels defaults to ["autopr"] -- label issues "autopr" to process them
-#   # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
-#   # exclude_labels = ["blocked"]    # custom: skip issues labeled "blocked"
+#   # include_labels = ["bug"]    # custom: only process issues labeled "bug"
 #   # include_labels = []             # opt-out: process ALL open issues
-#   # exclude_labels = []             # opt-out: disable default skip label
 `

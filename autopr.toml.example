@@ -62,24 +62,22 @@ name = "my-project"
 repo_url = "https://gitlab.com/myorg/my-project.git"
 test_cmd = "make test"
 base_branch = "main"
+  # exclude_labels = ["autopr-skip"] # DEFAULT — issues labeled "autopr-skip" are skipped
+  # exclude_labels = ["blocked"]   # custom: skip issues labeled "blocked"
+  # exclude_labels = []           # opt-out: disable default skip gate
 
   [projects.gitlab]
   base_url = "https://gitlab.com"
   project_id = "12345"
   # include_labels = ["autopr"]  # DEFAULT — only issues labeled "autopr" are processed
-  # exclude_labels = ["autopr-skip"] # DEFAULT — issues labeled "autopr-skip" are skipped
   # include_labels = ["bug"]     # custom: only process issues labeled "bug"
-  # exclude_labels = ["blocked"]   # custom: skip issues labeled "blocked"
   # include_labels = []           # opt-out: process ALL open issues (no label gating)
-  # exclude_labels = []           # opt-out: disable default skip gate
 
   # [projects.github]
   # owner = "myorg"
   # repo = "my-project"
   # include_labels = ["autopr"]  # DEFAULT — only issues labeled "autopr" are processed
-  # exclude_labels = ["autopr-skip"] # DEFAULT — issues labeled "autopr-skip" are skipped
   # include_labels = []           # opt-out: process ALL open issues (no label gating)
-  # exclude_labels = []           # opt-out: disable default skip gate
 
   # [projects.sentry]
   # org = "myorg"

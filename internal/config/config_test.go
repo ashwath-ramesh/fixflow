@@ -336,11 +336,11 @@ func TestLoadNormalizesExcludeLabels(t *testing.T) {
 name = "test"
 repo_url = "https://github.com/org/repo.git"
 test_cmd = "make test"
+exclude_labels = [" AUTOPR-SKIP ", "autopr-skip", "Bug", "bug"]
 
   [projects.github]
   owner = "org"
   repo = "repo"
-  exclude_labels = [" AUTOPR-SKIP ", "autopr-skip", "Bug", "bug"]
   include_labels = ["autopr"]
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
@@ -407,11 +407,11 @@ func TestLoadFailsForEmptyGitHubExcludeLabel(t *testing.T) {
 name = "test"
 repo_url = "https://github.com/org/repo.git"
 test_cmd = "make test"
+exclude_labels = ["autopr-skip", "   "]
 
   [projects.github]
   owner = "org"
   repo = "repo"
-  exclude_labels = ["autopr-skip", "   "]
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -741,11 +741,11 @@ func TestLoadExplicitEmptyExcludeLabelsDisablesGate(t *testing.T) {
 name = "test"
 repo_url = "https://github.com/org/repo.git"
 test_cmd = "make test"
+exclude_labels = []
 
   [projects.github]
   owner = "org"
   repo = "repo"
-  exclude_labels = []
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
