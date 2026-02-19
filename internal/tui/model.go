@@ -1017,6 +1017,11 @@ func (m Model) listView() string {
 			return base
 		}
 
+		timestampLabel := "UPDATED"
+		if m.sortColumn == "created_at" {
+			timestampLabel = "CREATED"
+		}
+
 		header := "  " +
 			headerStyle.Render(padRight("JOB", colJob)) +
 			headerStyle.Render(padRight(sortLabel([]string{"state"}, "STATE"), colState)) +
@@ -1024,7 +1029,7 @@ func (m Model) listView() string {
 			headerStyle.Render(padRight("SOURCE", colSource)) +
 			headerStyle.Render(padRight("RETRY", colRetry)) +
 			headerStyle.Render(padRight("ISSUE", colIssue)) +
-			headerStyle.Render(sortLabel([]string{"updated_at", "created_at"}, "UPDATED"))
+			headerStyle.Render(sortLabel([]string{"updated_at", "created_at"}, timestampLabel))
 		b.WriteString(header)
 		b.WriteString("\n")
 

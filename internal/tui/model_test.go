@@ -175,8 +175,8 @@ func TestListViewSortIndicatorInHeader(t *testing.T) {
 	m.sortColumn = "created_at"
 	m.sortAsc = false
 	view = m.listView()
-	if !strings.Contains(view, "UPDATED ▼") {
-		t.Fatalf("expected active sort indicator on UPDATED header for created_at sort, got:\n%s", view)
+	if !strings.Contains(view, "CREATED ▼") {
+		t.Fatalf("expected active sort indicator on CREATED header for created_at sort, got:\n%s", view)
 	}
 }
 
