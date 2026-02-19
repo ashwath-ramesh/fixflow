@@ -79,6 +79,12 @@ func PushBranchWithLease(ctx context.Context, dir, branchName string) error {
 	return runGit(ctx, dir, "push", "origin", "--force-with-lease", branchName)
 }
 
+// PushBranchWithLeaseCaptured pushes a branch with --force-with-lease without
+// writing output to the process stdout/stderr (safe for TUI callers).
+func PushBranchWithLeaseCaptured(ctx context.Context, dir, branchName string) error {
+	return runGitCaptured(ctx, dir, "push", "origin", "--force-with-lease", branchName)
+}
+
 // PushBranchCaptured pushes a branch to origin without writing output to the
 // process stdout/stderr. Any git output is captured and included in errors.
 func PushBranchCaptured(ctx context.Context, dir, branchName string) error {

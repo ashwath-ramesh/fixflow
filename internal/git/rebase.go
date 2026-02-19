@@ -12,7 +12,7 @@ import (
 
 // FetchBranch fetches the latest commits for the given base branch.
 func FetchBranch(ctx context.Context, dir, baseBranch string) error {
-	return runGit(ctx, dir, "fetch", "origin", "--", baseBranch)
+	return runGitCaptured(ctx, dir, "fetch", "origin", "--", baseBranch)
 }
 
 // ConfigureDiff3 enables diff3 conflict markers for clearer rebase conflict output.

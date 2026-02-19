@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -351,6 +352,7 @@ func (m Model) openIssue() tea.Msg {
 }
 
 // openURL opens a URL in the default browser across platforms.
+// Stdout/Stderr are discarded so child-process diagnostics cannot corrupt the TUI.
 func openURL(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -361,6 +363,8 @@ func openURL(url string) {
 	default: // linux, freebsd, etc.
 		cmd = exec.Command("xdg-open", url)
 	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	_ = cmd.Start()
 }
 
@@ -385,8 +389,8 @@ func (m Model) executeApprove() tea.Msg {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("rebase before push: %w", err)}
 	}
 
-	// Push branch to remote before creating PR.
-	if err := git.PushBranchWithLease(ctx, job.WorktreePath, job.BranchName); err != nil {
+	// Push branch to remote before creating PR (captured to avoid corrupting TUI).
+	if err := git.PushBranchWithLeaseCaptured(ctx, job.WorktreePath, job.BranchName); err != nil {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("push branch: %w", err)}
 	}
 
@@ -405,7 +409,16 @@ func (m Model) executeApprove() tea.Msg {
 		}
 	}
 
-	if err := m.store.TransitionState(ctx, job.ID, "ready", "approved"); err != nil {
+	// Re-fetch job state: the pipeline's maybeAutoPR may have already
+	// transitioned ready → approved while the TUI was waiting for user input.
+	fresh, err := m.store.GetJob(ctx, job.ID)
+	if err != nil {
+		return actionResultMsg{action: "approve", err: err}
+	}
+	if fresh.State == "approved" {
+		return actionResultMsg{action: "approve", prURL: prURL}
+	}
+	if err := m.store.TransitionState(ctx, fresh.ID, "ready", "approved"); err != nil {
 		return actionResultMsg{action: "approve", err: err}
 	}
 	return actionResultMsg{action: "approve", prURL: prURL}
