@@ -332,6 +332,8 @@ session detail and diff views to avoid content jumping.
 | Key | Action |
 |-----|--------|
 | `j/k` | Navigate up/down |
+| `n`/`PgDown` | Next page |
+| `p`/`PgUp` | Previous page |
 | `enter` | Drill into selected item |
 | `esc` | Go back one level |
 | `tab` | Toggle input/output (session view) |

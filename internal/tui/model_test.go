@@ -1072,6 +1072,12 @@ func TestHandleKeyLevel1PaginationControls(t *testing.T) {
 		t.Fatalf("expected page 1, cursor 10 after n; got page %d cursor %d", m.page, m.cursor)
 	}
 
+	modelAny, _ = m.handleKey(keyRunes('p'))
+	m = modelAny.(Model)
+	if m.page != 0 || m.cursor != 0 {
+		t.Fatalf("expected page 0, cursor 0 after p; got page %d cursor %d", m.page, m.cursor)
+	}
+
 	modelAny, _ = m.handleKey(keyRunes('n'))
 	m = modelAny.(Model)
 	if m.page != 2 || m.cursor != 20 {
@@ -1088,6 +1094,12 @@ func TestHandleKeyLevel1PaginationControls(t *testing.T) {
 	m = modelAny.(Model)
 	if m.page != 1 || m.cursor != 10 {
 		t.Fatalf("expected page 1, cursor 10 after pgup; got page %d cursor %d", m.page, m.cursor)
+	}
+
+	modelAny, _ = m.handleKey(keyRunes('p'))
+	m = modelAny.(Model)
+	if m.page != 0 || m.cursor != 0 {
+		t.Fatalf("expected page 0, cursor 0 after p; got page %d cursor %d", m.page, m.cursor)
 	}
 
 	modelAny, _ = m.handleKey(keyType(tea.KeyPgUp))
@@ -1139,6 +1151,12 @@ func TestListViewShowsPaginationInfo(t *testing.T) {
 	if !strings.Contains(view, "Page 2/3 (25 jobs)") {
 		t.Fatalf("expected page indicator in list footer, got:\n%s", view)
 	}
+	if !strings.Contains(view, "n/pgdown next page") {
+		t.Fatalf("expected next-page hint in pagination footer, got:\n%s", view)
+	}
+	if !strings.Contains(view, "p/pgup prev page") {
+		t.Fatalf("expected prev-page hint in pagination footer, got:\n%s", view)
+	}
 	if !strings.Contains(view, "010") {
 		t.Fatalf("expected current page to render page-1 first row, got:\n%s", view)
 	}
@@ -1167,6 +1185,12 @@ func TestListViewHandlesZeroAndOneJob(t *testing.T) {
 	view = m.listView()
 	if !strings.Contains(view, "Page 1/1 (1 jobs)") {
 		t.Fatalf("expected one-job pagination footer, got:\n%s", view)
+	}
+	if strings.Contains(view, "n/pgdown next page") {
+		t.Fatalf("did not expect next-page hint on single page, got:\n%s", view)
+	}
+	if strings.Contains(view, "p/pgup prev page") {
+		t.Fatalf("did not expect prev-page hint on single page, got:\n%s", view)
 	}
 	if !strings.Contains(view, "000") {
 		t.Fatalf("expected single job row, got:\n%s", view)
