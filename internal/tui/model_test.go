@@ -86,6 +86,117 @@ func TestListViewCancelPromptAndFooter(t *testing.T) {
 	}
 }
 
+func TestListViewSortKeysCycleAndRefresh(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	modelAny, cmd := m.handleKey(keyRunes('s'))
+	m = modelAny.(Model)
+	if m.sortColumn != "state" {
+		t.Fatalf("expected sortColumn=state after first s, got %q", m.sortColumn)
+	}
+	if m.cursor != 0 {
+		t.Fatalf("expected cursor reset to 0 on sort change")
+	}
+	if cmd == nil {
+		t.Fatalf("expected fetchJobs command for sort change")
+	}
+
+	modelAny, cmd = m.handleKey(keyRunes('s'))
+	m = modelAny.(Model)
+	if m.sortColumn != "project" {
+		t.Fatalf("expected sortColumn=project after second s, got %q", m.sortColumn)
+	}
+	if cmd == nil {
+		t.Fatalf("expected fetchJobs command for sort change")
+	}
+
+	modelAny, cmd = m.handleKey(keyRunes('s'))
+	m = modelAny.(Model)
+	if m.sortColumn != "created_at" {
+		t.Fatalf("expected sortColumn=created_at after third s, got %q", m.sortColumn)
+	}
+	if cmd == nil {
+		t.Fatalf("expected fetchJobs command for sort change")
+	}
+
+	modelAny, cmd = m.handleKey(keyRunes('s'))
+	m = modelAny.(Model)
+	if m.sortColumn != "updated_at" {
+		t.Fatalf("expected sortColumn=updated_at after fourth s, got %q", m.sortColumn)
+	}
+	if cmd == nil {
+		t.Fatalf("expected fetchJobs command for sort change")
+	}
+}
+
+func TestListViewToggleSortDirection(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.cursor = 3
+
+	modelAny, cmd := m.handleKey(keyRunes('S'))
+	m = modelAny.(Model)
+	if !m.sortAsc {
+		t.Fatalf("expected sortAsc=true after toggle")
+	}
+	if m.cursor != 0 {
+		t.Fatalf("expected cursor reset to 0 on sort direction toggle")
+	}
+	if cmd == nil {
+		t.Fatalf("expected fetchJobs command for sort direction toggle")
+	}
+}
+
+func TestListViewSortIndicatorInHeader(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	view := m.listView()
+	if !strings.Contains(view, "UPDATED ▼") {
+		t.Fatalf("expected default sort indicator on UPDATED header, got:\n%s", view)
+	}
+
+	m.sortColumn = "project"
+	m.sortAsc = true
+	view = m.listView()
+	if !strings.Contains(view, "PROJECT ▲") {
+		t.Fatalf("expected active sort indicator on PROJECT header, got:\n%s", view)
+	}
+
+	m.sortColumn = "created_at"
+	m.sortAsc = false
+	view = m.listView()
+	if !strings.Contains(view, "CREATED ▼") {
+		t.Fatalf("expected active sort indicator on CREATED header for created_at sort, got:\n%s", view)
+	}
+}
+
+func TestListViewSortFooterHints(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	view := m.listView()
+	if !strings.Contains(view, "s sort") {
+		t.Fatalf("expected footer hint for sort key, got:\n%s", view)
+	}
+	if !strings.Contains(view, "S toggle sort dir") {
+		t.Fatalf("expected footer hint for sort direction key, got:\n%s", view)
+	}
+}
+
 func TestDetailViewCancelPromptAndConfirmNo(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -173,7 +284,7 @@ func TestCancelWithCleanupWarningStillSucceeds(t *testing.T) {
 	if err := store.UpdateJobField(ctx, jobID, "worktree_path", badPath); err != nil {
 		t.Fatalf("set invalid worktree path: %v", err)
 	}
-	jobs, err := store.ListJobs(ctx, "", "all")
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
@@ -249,7 +360,7 @@ func newTestModelWithQueuedJob(t *testing.T, tmp string) (Model, *db.Store, stri
 		},
 	}
 	m := NewModel(store, cfg)
-	jobs, err := store.ListJobs(ctx, "", "all")
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
@@ -655,7 +766,7 @@ func TestSelectedSyncsAfterJobsMsg(t *testing.T) {
 	transitionToReviewing(t, store, jobID)
 
 	// Simulate a jobsMsg arriving (as auto-refresh would deliver).
-	jobs, err := store.ListJobs(ctx, "", "all")
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}
@@ -750,7 +861,7 @@ func TestCancelOnReviewingStateJob(t *testing.T) {
 	// Move job to "reviewing" via valid state machine path.
 	transitionToReviewing(t, store, jobID)
 
-	jobs, err := store.ListJobs(ctx, "", "all")
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
 	if err != nil {
 		t.Fatalf("list jobs: %v", err)
 	}

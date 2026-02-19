@@ -79,6 +79,8 @@ type Model struct {
 	jobs          []db.Job
 	issueSummary  db.IssueSyncSummary
 	cursor        int
+	sortColumn    string
+	sortAsc       bool
 	page          int
 	pageSize      int
 	daemonRunning bool
@@ -115,6 +117,8 @@ func NewModel(store *db.Store, cfg *config.Config) Model {
 	return Model{
 		store:         store,
 		cfg:           cfg,
+		sortColumn:    "updated_at",
+		sortAsc:       false,
 		daemonRunning: isDaemonRunning(cfg.Daemon.PIDFile),
 		page:          0,
 		pageSize:      1,
@@ -166,7 +170,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) fetchJobs() tea.Msg {
-	jobs, err := m.store.ListJobs(context.Background(), "", "all")
+	jobs, err := m.store.ListJobs(context.Background(), "", "all", m.sortColumn, m.sortAsc)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -606,6 +610,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
+	nextSortColumn := func(column string) string {
+		switch column {
+		case "updated_at":
+			return "state"
+		case "state":
+			return "project"
+		case "project":
+			return "created_at"
+		case "created_at":
+			return "updated_at"
+		default:
+			return "updated_at"
+		}
+	}
+
 	pageSize := m.pageSize
 	if pageSize < 1 {
 		pageSize = 1
@@ -663,6 +682,14 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 		} else {
 			m.cursor = start
 		}
+	case "s":
+		m.sortColumn = nextSortColumn(m.sortColumn)
+		m.cursor = 0
+		return m, m.fetchJobs
+	case "S":
+		m.sortAsc = !m.sortAsc
+		m.cursor = 0
+		return m, m.fetchJobs
 	case "enter":
 		if m.cursor < totalJobs {
 			m.selected = &m.jobs[m.cursor]
@@ -1032,16 +1059,34 @@ func (m Model) listView() string {
 		b.WriteString(dimStyle.Render("No jobs found. Waiting for issues..."))
 		b.WriteString("\n")
 	} else {
+		sortLabel := func(columns []string, base string) string {
+			for _, column := range columns {
+				if m.sortColumn != column {
+					continue
+				}
+				if m.sortAsc {
+					return base + " ▲"
+				}
+				return base + " ▼"
+			}
+			return base
+		}
+
+		timestampLabel := "UPDATED"
+		if m.sortColumn == "created_at" {
+			timestampLabel = "CREATED"
+		}
+
 		start := pageStart(page, pageSize)
 		end := min(start+pageSize, len(m.jobs))
 		header := "  " +
 			headerStyle.Render(padRight("JOB", colJob)) +
-			headerStyle.Render(padRight("STATE", colState)) +
-			headerStyle.Render(padRight("PROJECT", colProject)) +
+			headerStyle.Render(padRight(sortLabel([]string{"state"}, "STATE"), colState)) +
+			headerStyle.Render(padRight(sortLabel([]string{"project"}, "PROJECT"), colProject)) +
 			headerStyle.Render(padRight("SOURCE", colSource)) +
 			headerStyle.Render(padRight("RETRY", colRetry)) +
 			headerStyle.Render(padRight("ISSUE", colIssue)) +
-			headerStyle.Render("UPDATED")
+			headerStyle.Render(sortLabel([]string{"updated_at", "created_at"}, timestampLabel))
 		b.WriteString(header)
 		b.WriteString("\n")
 
@@ -1104,6 +1149,7 @@ func (m Model) listView() string {
 	if m.cursor < len(m.jobs) && db.IsCancellableState(m.jobs[m.cursor].State) {
 		hints = append(hints, "c cancel")
 	}
+	hints = append(hints, "s sort", "S toggle sort dir")
 	hints = append(hints, "r refresh", "q quit")
 	b.WriteString(dimStyle.Render(strings.Join(hints, "  ")))
 	return b.String()

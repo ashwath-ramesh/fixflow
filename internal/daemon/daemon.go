@@ -74,7 +74,7 @@ func Run(cfg *config.Config, foreground bool) error {
 	jobCh := make(chan string, 100)
 
 	// Re-enqueue any existing queued jobs from DB.
-	queuedJobs, err := store.ListJobs(ctx, "", "queued")
+	queuedJobs, err := store.ListJobs(ctx, "", "queued", "updated_at", false)
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}
