@@ -75,7 +75,7 @@ See [Section 5](#5-setting-up-a-project) for full setup details.
 ### 2.4 Start the daemon
 
 ```bash
-# macOS (recommended always-on):
+# macOS (persists across reboots):
 ap service install
 ap service status
 
@@ -83,6 +83,10 @@ ap service status
 ap start                   # background daemon
 ap start -f                # foreground (for debugging)
 ```
+
+> **Note:** On a MacBook, the daemon suspends when the machine sleeps — it does not
+> process issues overnight with the lid closed. It resumes instantly on wake.
+> For true 24/7 operation, run `ap` on an always-on server (Linux VM, cloud instance, etc.).
 
 ### 2.5 Watch it work
 
