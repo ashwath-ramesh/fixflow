@@ -18,7 +18,7 @@ var (
 	cfgPath string
 	verbose bool
 	jsonOut bool
-	version = "dev"
+	version = config.Version
 	commit  = "unknown"
 )
 
