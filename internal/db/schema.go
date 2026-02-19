@@ -3,7 +3,10 @@ package db
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"autopr/internal/git"
 )
 
 const schemaVersion = 1
@@ -38,7 +41,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     autopr_issue_id TEXT NOT NULL REFERENCES issues(autopr_issue_id) ON DELETE RESTRICT,
     project_name     TEXT NOT NULL,
     state            TEXT NOT NULL DEFAULT 'queued'
-        CHECK(state IN ('queued','planning','implementing','reviewing','testing','ready','approved','rejected','failed','cancelled')),
+        CHECK(state IN ('queued','planning','implementing','reviewing','testing','ready','rebasing','resolving_conflicts','approved','rejected','failed','cancelled')),
     iteration        INTEGER NOT NULL DEFAULT 0 CHECK(iteration >= 0),
     max_iterations   INTEGER NOT NULL DEFAULT 3 CHECK(max_iterations > 0),
     worktree_path    TEXT,
@@ -47,6 +50,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     human_notes      TEXT,
     error_message    TEXT,
     pr_url           TEXT,
+    pr_merged_at     TEXT,
+    pr_closed_at     TEXT,
     reject_reason    TEXT,
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -64,7 +69,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_per_issue
 CREATE TABLE IF NOT EXISTS llm_sessions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id        TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    step          TEXT NOT NULL CHECK(step IN ('plan','plan_review','implement','code_review','tests')),
+    step          TEXT NOT NULL CHECK(step IN ('plan','plan_review','implement','code_review','tests','conflict_resolution')),
     iteration     INTEGER NOT NULL DEFAULT 0,
     llm_provider  TEXT NOT NULL CHECK(llm_provider IN ('codex', 'claude')),
     prompt_hash   TEXT,
@@ -87,7 +92,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     autopr_issue_id  TEXT NOT NULL,
-    kind             TEXT NOT NULL CHECK(kind IN ('plan','plan_review','code_review','test_output')),
+    kind             TEXT NOT NULL CHECK(kind IN ('plan','plan_review','code_review','test_output','rebase_conflict','rebase_result')),
     content          TEXT NOT NULL,
     iteration        INTEGER NOT NULL DEFAULT 0,
     commit_sha       TEXT,
@@ -147,7 +152,19 @@ func (s *Store) createSchema() error {
 	if err := s.migrateJobsForCancelledState(); err != nil {
 		return err
 	}
+	if err := s.migrateJobsForRebasingState(); err != nil {
+		return err
+	}
 	if err := s.migrateSessionsForCancelledStatus(); err != nil {
+		return err
+	}
+	if err := s.migrateSessionsForConflictResolutionStep(); err != nil {
+		return err
+	}
+	if err := s.migrateArtifactsForRebaseKind(); err != nil {
+		return err
+	}
+	if err := s.migrateArtifactsForRebaseResultKind(); err != nil {
 		return err
 	}
 	// Recreate to ensure predicate includes cancelled for existing DBs.
@@ -175,6 +192,57 @@ func (s *Store) tableSQL(table string) (string, error) {
 	return strings.ToLower(sqlText), nil
 }
 
+func normalizeForeignKeysPragma(raw string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "1", "ON":
+		return "ON"
+	case "0", "OFF":
+		return "OFF"
+	default:
+		return "OFF"
+	}
+}
+
+func (s *Store) withForeignKeysOff(fn func() error) error {
+	var fnErr error
+	var original string
+	if err := s.Writer.QueryRow("PRAGMA foreign_keys").Scan(&original); err != nil {
+		return fmt.Errorf("read foreign_keys pragma: %w", err)
+	}
+
+	original = normalizeForeignKeysPragma(original)
+	if _, err := s.Writer.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+		return fmt.Errorf("disable foreign_keys pragma: %w", err)
+	}
+
+	restore := func() error {
+		_, err := s.Writer.Exec("PRAGMA foreign_keys = " + original)
+		if err != nil {
+			return fmt.Errorf("restore foreign_keys pragma: %w", err)
+		}
+		return nil
+	}
+
+	defer func() {
+		restoreErr := restore()
+		if restoreErr == nil {
+			return
+		}
+		if fnErr == nil {
+			fnErr = restoreErr
+			return
+		}
+		fnErr = fmt.Errorf("%w; %v", fnErr, restoreErr)
+	}()
+
+	fnErr = fn()
+
+	if fnErr != nil {
+		return fnErr
+	}
+	return nil
+}
+
 func (s *Store) migrateJobsForCancelledState() error {
 	sqlText, err := s.tableSQL("jobs")
 	if err != nil {
@@ -184,16 +252,14 @@ func (s *Store) migrateJobsForCancelledState() error {
 		return nil
 	}
 
-	_, _ = s.Writer.Exec("PRAGMA foreign_keys=OFF")
-	defer func() { _, _ = s.Writer.Exec("PRAGMA foreign_keys=ON") }()
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin jobs migration: %w", err)
+		}
+		defer tx.Rollback()
 
-	tx, err := s.Writer.Begin()
-	if err != nil {
-		return fmt.Errorf("begin jobs migration: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 CREATE TABLE jobs_new (
     id              TEXT PRIMARY KEY,
     autopr_issue_id TEXT NOT NULL REFERENCES issues(autopr_issue_id) ON DELETE RESTRICT,
@@ -216,10 +282,91 @@ CREATE TABLE jobs_new (
     pr_merged_at     TEXT,
     pr_closed_at     TEXT
 )`); err != nil {
-		return fmt.Errorf("create jobs_new: %w", err)
+			return fmt.Errorf("create jobs_new: %w", err)
+		}
+
+		if _, err := tx.Exec(`
+INSERT INTO jobs_new (
+			id, autopr_issue_id, project_name, state, iteration, max_iterations,
+    worktree_path, branch_name, commit_sha, human_notes, error_message,
+    pr_url, reject_reason, created_at, updated_at, started_at, completed_at,
+    pr_merged_at, pr_closed_at
+)
+SELECT
+    id, autopr_issue_id, project_name, state, iteration, max_iterations,
+    worktree_path, branch_name, commit_sha, human_notes, error_message,
+    pr_url, reject_reason, created_at, updated_at, started_at, completed_at,
+    pr_merged_at, pr_closed_at
+FROM jobs`); err != nil {
+			return fmt.Errorf("copy jobs rows: %w", err)
+		}
+
+		if _, err := tx.Exec(`DROP TABLE jobs`); err != nil {
+			return fmt.Errorf("drop jobs: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE jobs_new RENAME TO jobs`); err != nil {
+			return fmt.Errorf("rename jobs_new: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state)`); err != nil {
+			return fmt.Errorf("create idx_jobs_state: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_issue ON jobs(autopr_issue_id)`); err != nil {
+			return fmt.Errorf("create idx_jobs_issue: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state_project ON jobs(state, project_name)`); err != nil {
+			return fmt.Errorf("create idx_jobs_state_project: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit jobs migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) migrateJobsForRebasingState() error {
+	sqlText, err := s.tableSQL("jobs")
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "'rebasing'") && strings.Contains(sqlText, "'resolving_conflicts'") {
+		return nil
 	}
 
-	if _, err := tx.Exec(`
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin jobs migration: %w", err)
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.Exec(`
+CREATE TABLE jobs_new (
+    id              TEXT PRIMARY KEY,
+    autopr_issue_id TEXT NOT NULL REFERENCES issues(autopr_issue_id) ON DELETE RESTRICT,
+    project_name     TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'queued'
+        CHECK(state IN ('queued','planning','implementing','reviewing','testing','ready','rebasing','resolving_conflicts','approved','rejected','failed','cancelled')),
+    iteration        INTEGER NOT NULL DEFAULT 0 CHECK(iteration >= 0),
+    max_iterations   INTEGER NOT NULL DEFAULT 3 CHECK(max_iterations > 0),
+    worktree_path    TEXT,
+    branch_name      TEXT,
+    commit_sha       TEXT,
+    human_notes      TEXT,
+    error_message    TEXT,
+    pr_url           TEXT,
+    reject_reason    TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    started_at       TEXT,
+    completed_at     TEXT,
+    pr_merged_at     TEXT,
+    pr_closed_at     TEXT
+)`); err != nil {
+			return fmt.Errorf("create jobs_new for rebasing migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`
 INSERT INTO jobs_new (
     id, autopr_issue_id, project_name, state, iteration, max_iterations,
     worktree_path, branch_name, commit_sha, human_notes, error_message,
@@ -232,29 +379,35 @@ SELECT
     pr_url, reject_reason, created_at, updated_at, started_at, completed_at,
     pr_merged_at, pr_closed_at
 FROM jobs`); err != nil {
-		return fmt.Errorf("copy jobs rows: %w", err)
-	}
+			return fmt.Errorf("copy jobs rows for rebasing migration: %w", err)
+		}
 
-	if _, err := tx.Exec(`DROP TABLE jobs`); err != nil {
-		return fmt.Errorf("drop jobs: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE jobs_new RENAME TO jobs`); err != nil {
-		return fmt.Errorf("rename jobs_new: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state)`); err != nil {
-		return fmt.Errorf("create idx_jobs_state: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_issue ON jobs(autopr_issue_id)`); err != nil {
-		return fmt.Errorf("create idx_jobs_issue: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state_project ON jobs(state, project_name)`); err != nil {
-		return fmt.Errorf("create idx_jobs_state_project: %w", err)
-	}
+		if _, err := tx.Exec(`DROP TABLE jobs`); err != nil {
+			return fmt.Errorf("drop jobs for rebasing migration: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE jobs_new RENAME TO jobs`); err != nil {
+			return fmt.Errorf("rename jobs_new for rebasing migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state)`); err != nil {
+			return fmt.Errorf("create idx_jobs_state for rebasing migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_issue ON jobs(autopr_issue_id)`); err != nil {
+			return fmt.Errorf("create idx_jobs_issue for rebasing migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_state_project ON jobs(state, project_name)`); err != nil {
+			return fmt.Errorf("create idx_jobs_state_project for rebasing migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_per_issue
+    ON jobs(autopr_issue_id)
+    WHERE state NOT IN ('approved', 'rejected', 'failed', 'cancelled')`); err != nil {
+			return fmt.Errorf("create active-job index for rebasing migration: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit jobs migration: %w", err)
-	}
-	return nil
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit jobs rebasing migration: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *Store) migrateSessionsForCancelledStatus() error {
@@ -266,13 +419,14 @@ func (s *Store) migrateSessionsForCancelledStatus() error {
 		return nil
 	}
 
-	tx, err := s.Writer.Begin()
-	if err != nil {
-		return fmt.Errorf("begin llm_sessions migration: %w", err)
-	}
-	defer tx.Rollback()
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin llm_sessions migration: %w", err)
+		}
+		defer tx.Rollback()
 
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 CREATE TABLE llm_sessions_new (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id        TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -292,10 +446,10 @@ CREATE TABLE llm_sessions_new (
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     completed_at  TEXT
 )`); err != nil {
-		return fmt.Errorf("create llm_sessions_new: %w", err)
-	}
+			return fmt.Errorf("create llm_sessions_new: %w", err)
+		}
 
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 INSERT INTO llm_sessions_new (
     id, job_id, step, iteration, llm_provider, prompt_hash, response_text, prompt_text,
     input_tokens, output_tokens, duration_ms, jsonl_path, commit_sha, status,
@@ -306,23 +460,209 @@ SELECT
     input_tokens, output_tokens, duration_ms, jsonl_path, commit_sha, status,
     error_message, created_at, completed_at
 FROM llm_sessions`); err != nil {
-		return fmt.Errorf("copy llm_sessions rows: %w", err)
+			return fmt.Errorf("copy llm_sessions rows: %w", err)
+		}
+
+		if _, err := tx.Exec(`DROP TABLE llm_sessions`); err != nil {
+			return fmt.Errorf("drop llm_sessions: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE llm_sessions_new RENAME TO llm_sessions`); err != nil {
+			return fmt.Errorf("rename llm_sessions_new: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_job ON llm_sessions(job_id)`); err != nil {
+			return fmt.Errorf("create idx_sessions_job: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit llm_sessions migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) migrateSessionsForConflictResolutionStep() error {
+	sqlText, err := s.tableSQL("llm_sessions")
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "'conflict_resolution'") && !strings.Contains(sqlText, "'rebase'") {
+		return nil
 	}
 
-	if _, err := tx.Exec(`DROP TABLE llm_sessions`); err != nil {
-		return fmt.Errorf("drop llm_sessions: %w", err)
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin llm_sessions conflict migration: %w", err)
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.Exec(`
+CREATE TABLE llm_sessions_new (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id        TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    step          TEXT NOT NULL CHECK(step IN ('plan','plan_review','implement','code_review','tests','conflict_resolution')),
+    iteration     INTEGER NOT NULL DEFAULT 0,
+    llm_provider  TEXT NOT NULL CHECK(llm_provider IN ('codex', 'claude')),
+    prompt_hash   TEXT,
+    response_text TEXT,
+    prompt_text    TEXT,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    duration_ms   INTEGER,
+    jsonl_path    TEXT,
+    commit_sha    TEXT,
+    status        TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','completed','failed','cancelled')),
+    error_message TEXT,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    completed_at  TEXT
+)`); err != nil {
+			return fmt.Errorf("create llm_sessions_new for conflict migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`
+INSERT INTO llm_sessions_new (
+    id, job_id, step, iteration, llm_provider, prompt_hash, response_text, prompt_text,
+    input_tokens, output_tokens, duration_ms, jsonl_path, commit_sha, status,
+    error_message, created_at, completed_at
+)
+SELECT
+    id, job_id, CASE WHEN step = 'rebase' THEN 'conflict_resolution' ELSE step END, iteration,
+    llm_provider, prompt_hash, response_text, prompt_text,
+    input_tokens, output_tokens, duration_ms, jsonl_path, commit_sha, status,
+    error_message, created_at, completed_at
+FROM llm_sessions`); err != nil {
+			return fmt.Errorf("copy llm_sessions rows for conflict migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`DROP TABLE llm_sessions`); err != nil {
+			return fmt.Errorf("drop llm_sessions for conflict migration: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE llm_sessions_new RENAME TO llm_sessions`); err != nil {
+			return fmt.Errorf("rename llm_sessions_new for conflict migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_job ON llm_sessions(job_id)`); err != nil {
+			return fmt.Errorf("create idx_sessions_job for conflict migration: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit llm_sessions conflict migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) migrateArtifactsForRebaseKind() error {
+	sqlText, err := s.tableSQL("artifacts")
+	if err != nil {
+		return err
 	}
-	if _, err := tx.Exec(`ALTER TABLE llm_sessions_new RENAME TO llm_sessions`); err != nil {
-		return fmt.Errorf("rename llm_sessions_new: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_job ON llm_sessions(job_id)`); err != nil {
-		return fmt.Errorf("create idx_sessions_job: %w", err)
+	if strings.Contains(sqlText, "'rebase_conflict'") {
+		return nil
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit llm_sessions migration: %w", err)
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin artifacts migration: %w", err)
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.Exec(`
+CREATE TABLE artifacts_new (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    autopr_issue_id  TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK(kind IN ('plan','plan_review','code_review','test_output','rebase_conflict')),
+    content          TEXT NOT NULL,
+    iteration        INTEGER NOT NULL DEFAULT 0,
+    commit_sha       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+)`); err != nil {
+			return fmt.Errorf("create artifacts_new for rebase conflict migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`
+INSERT INTO artifacts_new (
+    id, job_id, autopr_issue_id, kind, content, iteration, commit_sha, created_at
+)
+SELECT
+    id, job_id, autopr_issue_id, kind, content, iteration, commit_sha, created_at
+FROM artifacts`); err != nil {
+			return fmt.Errorf("copy artifacts rows for rebase conflict migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`DROP TABLE artifacts`); err != nil {
+			return fmt.Errorf("drop artifacts for rebase conflict migration: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE artifacts_new RENAME TO artifacts`); err != nil {
+			return fmt.Errorf("rename artifacts_new for rebase conflict migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id)`); err != nil {
+			return fmt.Errorf("create idx_artifacts_job for rebase conflict migration: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit artifacts migration: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) migrateArtifactsForRebaseResultKind() error {
+	sqlText, err := s.tableSQL("artifacts")
+	if err != nil {
+		return err
 	}
-	return nil
+	if strings.Contains(sqlText, "'rebase_result'") {
+		return nil
+	}
+
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin artifacts rebase_result migration: %w", err)
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.Exec(`
+CREATE TABLE artifacts_new (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id           TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    autopr_issue_id  TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK(kind IN ('plan','plan_review','code_review','test_output','rebase_conflict','rebase_result')),
+    content          TEXT NOT NULL,
+    iteration        INTEGER NOT NULL DEFAULT 0,
+    commit_sha       TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+)`); err != nil {
+			return fmt.Errorf("create artifacts_new for rebase_result migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`
+INSERT INTO artifacts_new (
+    id, job_id, autopr_issue_id, kind, content, iteration, commit_sha, created_at
+)
+SELECT
+    id, job_id, autopr_issue_id, kind, content, iteration, commit_sha, created_at
+FROM artifacts`); err != nil {
+			return fmt.Errorf("copy artifacts rows for rebase_result migration: %w", err)
+		}
+
+		if _, err := tx.Exec(`DROP TABLE artifacts`); err != nil {
+			return fmt.Errorf("drop artifacts for rebase_result migration: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE artifacts_new RENAME TO artifacts`); err != nil {
+			return fmt.Errorf("rename artifacts_new for rebase_result migration: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id)`); err != nil {
+			return fmt.Errorf("create idx_artifacts_job for rebase_result migration: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit artifacts rebase_result migration: %w", err)
+		}
+		return nil
+	})
 }
 
 // migrateNotificationEventsNeedsPR renames event_type 'awaiting_approval' → 'needs_pr'
@@ -336,13 +676,14 @@ func (s *Store) migrateNotificationEventsNeedsPR() error {
 		return nil
 	}
 
-	tx, err := s.Writer.Begin()
-	if err != nil {
-		return fmt.Errorf("begin notification_events migration: %w", err)
-	}
-	defer tx.Rollback()
+	return s.withForeignKeysOff(func() error {
+		tx, err := s.Writer.Begin()
+		if err != nil {
+			return fmt.Errorf("begin notification_events migration: %w", err)
+		}
+		defer tx.Rollback()
 
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 CREATE TABLE notification_events_new (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id     TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -353,45 +694,91 @@ CREATE TABLE notification_events_new (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 )`); err != nil {
-		return fmt.Errorf("create notification_events_new: %w", err)
-	}
+			return fmt.Errorf("create notification_events_new: %w", err)
+		}
 
-	if _, err := tx.Exec(`
+		if _, err := tx.Exec(`
 INSERT INTO notification_events_new (id, job_id, event_type, status, attempts, last_error, created_at, updated_at)
 SELECT id, job_id,
        CASE WHEN event_type = 'awaiting_approval' THEN 'needs_pr' ELSE event_type END,
        status, attempts, last_error, created_at, updated_at
 FROM notification_events`); err != nil {
-		return fmt.Errorf("copy notification_events rows: %w", err)
-	}
+			return fmt.Errorf("copy notification_events rows: %w", err)
+		}
 
-	if _, err := tx.Exec(`DROP TABLE notification_events`); err != nil {
-		return fmt.Errorf("drop notification_events: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE notification_events_new RENAME TO notification_events`); err != nil {
-		return fmt.Errorf("rename notification_events_new: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_status_created ON notification_events(status, created_at)`); err != nil {
-		return fmt.Errorf("create idx_notification_events_status_created: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_job ON notification_events(job_id)`); err != nil {
-		return fmt.Errorf("create idx_notification_events_job: %w", err)
-	}
+		if _, err := tx.Exec(`DROP TABLE notification_events`); err != nil {
+			return fmt.Errorf("drop notification_events: %w", err)
+		}
+		if _, err := tx.Exec(`ALTER TABLE notification_events_new RENAME TO notification_events`); err != nil {
+			return fmt.Errorf("rename notification_events_new: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_status_created ON notification_events(status, created_at)`); err != nil {
+			return fmt.Errorf("create idx_notification_events_status_created: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_events_job ON notification_events(job_id)`); err != nil {
+			return fmt.Errorf("create idx_notification_events_job: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit notification_events migration: %w", err)
-	}
-	return nil
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit notification_events migration: %w", err)
+		}
+		return nil
+	})
 }
 
-// RecoverInFlightJobs resets any jobs stuck in active states back to queued.
+// RecoverInFlightJobs resets any jobs stuck in active states back to queued,
+// except rebasing/resolving_conflicts which return to ready to continue readiness checks.
 // Called on daemon startup after a crash.
-func (s *Store) RecoverInFlightJobs(ctx context.Context) (int64, error) {
+//
+// reposRoot is used as a safety boundary so cleanup logic only removes metadata
+// under the configured repository root.
+func (s *Store) RecoverInFlightJobs(ctx context.Context, reposRoot string) (int64, error) {
+	inFlightQuery := `
+SELECT id, state, COALESCE(worktree_path, '')
+FROM jobs
+WHERE state IN ('planning', 'implementing', 'reviewing', 'testing', 'rebasing', 'resolving_conflicts')`
+	rows, err := s.Reader.QueryContext(ctx, inFlightQuery)
+	if err != nil {
+		return 0, fmt.Errorf("recover in-flight jobs: query in-flight jobs: %w", err)
+	}
+	defer rows.Close()
+	type inflightJob struct {
+		ID       string
+		State    string
+		Worktree string
+	}
+	recoveredJobs := make([]inflightJob, 0, 32)
+	for rows.Next() {
+		var job inflightJob
+		if err := rows.Scan(&job.ID, &job.State, &job.Worktree); err != nil {
+			return 0, fmt.Errorf("recover in-flight jobs: scan in-flight job: %w", err)
+		}
+		recoveredJobs = append(recoveredJobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("recover in-flight jobs: in-flight rows: %w", err)
+	}
+
+	for _, job := range recoveredJobs {
+		if job.State != "rebasing" && job.State != "resolving_conflicts" {
+			continue
+		}
+		if err := git.CleanupStaleRebase(job.Worktree, reposRoot); err != nil {
+			slog.Warn("failed to cleanup rebase metadata", "job", job.ID, "worktree", job.Worktree, "err", err)
+		}
+	}
+
 	res, err := s.Writer.ExecContext(ctx,
-		`UPDATE jobs SET state = 'queued', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-		 WHERE state IN ('planning', 'implementing', 'reviewing', 'testing')`)
+		`UPDATE jobs
+	SET state = CASE
+		WHEN state IN ('rebasing', 'resolving_conflicts') THEN 'ready'
+		ELSE 'queued'
+	END,
+	updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+	WHERE state IN ('planning', 'implementing', 'reviewing', 'testing', 'rebasing', 'resolving_conflicts')`)
 	if err != nil {
 		return 0, fmt.Errorf("recover in-flight jobs: %w", err)
 	}
+
 	return res.RowsAffected()
 }

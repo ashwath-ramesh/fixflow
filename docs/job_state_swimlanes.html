@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AutoPR — Job States</title>
+  <title>AutoPR — Job States (Swimlanes)</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -14,20 +14,22 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 2rem 1rem;
+      padding: 1.5rem 1rem 2rem;
       min-height: 100vh;
     }
 
     h1 {
-      font-size: 1.4rem;
-      font-weight: 600;
+      font-size: 1.35rem;
+      font-weight: 650;
       letter-spacing: -0.02em;
+      text-align: center;
     }
 
     .subtitle {
       color: #8b949e;
-      margin: 0.4rem 0 1.5rem;
-      font-size: 0.85rem;
+      margin: 0.35rem 0;
+      font-size: 0.83rem;
+      text-align: center;
     }
 
     /* ── Legend ── */
@@ -74,22 +76,106 @@
     .legend-item[data-actor="llm"]     .legend-dot { background: #d29922; }
     .legend-item[data-actor="config"]  .legend-dot { background: #8b949e; }
 
+    .diagram-shell {
+      width: min(95vw, 1500px);
+    }
+
+    .phase-ruler {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      gap: 0.35rem;
+      margin-bottom: 0.6rem;
+      color: #6e7681;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .phase-ruler span {
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      background: #111720;
+      padding: 0.45rem 0.35rem;
+    }
+
+    .viewport-tools {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 0.45rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .viewport-tools button {
+      background: #21262d;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.28rem 0.52rem;
+      cursor: pointer;
+      min-width: 2rem;
+    }
+
+    .viewport-tools button:hover {
+      border-color: #58a6ff;
+      color: #f0f6fc;
+    }
+
+    .viewport-tools button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      border-color: #30363d;
+      color: #8b949e;
+    }
+
+    .zoom-level {
+      min-width: 3.3rem;
+      text-align: center;
+      color: #8b949e;
+      font-size: 0.74rem;
+      font-variant-numeric: tabular-nums;
+    }
+
     /* ── Diagram wrapper ── */
     #diagram-container {
-      background: #161b22;
+      background: linear-gradient(180deg, rgba(22,27,34,0.92), rgba(15,20,27,0.92));
       border: 1px solid #30363d;
       border-radius: 12px;
-      padding: 2rem;
-      width: 95vw;
-      max-width: 1400px;
+      padding: 1.6rem;
+      width: 100%;
       overflow-x: auto;
       position: relative;
+      touch-action: none;
+    }
+
+    #diagram-container.panning {
+      cursor: grabbing;
+    }
+
+    #diagram-container::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(to right, rgba(110,118,129,0.17) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(110,118,129,0.12) 1px, transparent 1px);
+      background-size:
+        calc(100% / 6) 100%,
+        100% calc(100% / 6);
+      border-radius: 12px;
     }
 
     #diagram-container svg {
       width: 100% !important;
       height: auto !important;
-      min-height: 60vh;
+      min-height: 62vh;
+      position: relative;
+      z-index: 1;
     }
 
     /* ── Tooltip ── */
@@ -184,11 +270,13 @@
 
     /* ── Instructions bar ── */
     .instructions {
-      margin-top: 1.2rem;
+      margin-top: 1rem;
       display: flex;
       gap: 1.5rem;
       font-size: 0.75rem;
       color: #484f58;
+      flex-wrap: wrap;
+      justify-content: center;
     }
 
     .instructions kbd {
@@ -200,30 +288,13 @@
       font-size: 0.7rem;
     }
 
-    .workflow-controls {
-      margin-top: 0.7rem;
-      font-size: 0.74rem;
-      color: #8b949e;
-      display: flex;
-      justify-content: center;
-      gap: 0.75rem;
-    }
-
-    .workflow-controls label {
-      cursor: pointer;
-      user-select: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
-
   </style>
 </head>
 <body>
 
-  <h1>AutoPR &mdash; Job State Machine</h1>
-  <p class="subtitle">Flow mirrors a standard git PR path: plan → edit/review → CI → rebase/recover → PR gate.</p>
-  <p class="subtitle">Hover actor legend to filter &middot; Click action block (ap retry/ap cancel/step error) to group transitions &middot; Click a specific arrow for one transition</p>
+  <h1>AutoPR &mdash; Job State Machine (Swimlane View)</h1>
+  <p class="subtitle">Left-to-right timeline with row lanes: core flow, conflict recovery, shared actions, terminal states.</p>
+  <p class="subtitle">Hover actor legend to filter &middot; Click action hubs (ap retry/ap cancel/step error) to group transitions &middot; Click a specific arrow to isolate one transition</p>
 
   <div class="legend">
     <div class="legend-item" data-actor="daemon">
@@ -239,41 +310,51 @@
       <span class="legend-dot"></span><span>Config &nbsp;(auto_pr)</span>
     </div>
   </div>
-  <div id="diagram-container">
-    <pre class="mermaid">
-flowchart TD
+  <div class="diagram-shell">
+    <div class="phase-ruler" aria-hidden="true">
+      <span>1 Intake</span>
+      <span>2 Build</span>
+      <span>3 Review + Test</span>
+      <span>4 Rebase/Recover</span>
+      <span>5 Approval Gate</span>
+      <span>6 Terminal</span>
+    </div>
+    <div class="viewport-tools">
+      <button id="zoom-out" type="button" aria-label="Zoom out">-</button>
+      <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+      <button id="zoom-reset" type="button" aria-label="Reset zoom">Reset</button>
+      <span id="zoom-level" class="zoom-level">100%</span>
+    </div>
+    <div id="diagram-container">
+      <pre class="mermaid">
+flowchart LR
     start(( )) -->|"⚙ job created"| queued
 
-    subgraph Intake
+    subgraph Lane_Core["Lane A · Core Pipeline"]
+        direction LR
         queued([queued])
         planning([planning])
-    end
-
-    subgraph Execution
         implementing([implementing])
         reviewing([reviewing])
-    end
-
-    subgraph Verification
         testing([testing])
+        rebasing([rebasing])
+        ready([ready])
     end
 
-    subgraph Readiness_Checks["Readiness Checks"]
-        rebasing([rebasing])
+    subgraph Lane_Conflicts["Lane B · Conflict Recovery"]
+        direction LR
         resolving_conflicts([resolving_conflicts])
     end
 
-    subgraph Shared_Actions["Shared Actions"]
+    subgraph Lane_Actions["Lane C · Shared Actions"]
+        direction LR
         ap_cancel([👤 ap cancel])
         step_error([step error])
         ap_retry([👤 ap retry])
     end
 
-    subgraph Human_Gate["Human Gate"]
-        ready([ready])
-    end
-
-    subgraph Terminal
+    subgraph Lane_Terminal["Lane D · Terminal States"]
+        direction LR
         approved([approved])
         rejected([rejected])
         failed([failed])
@@ -282,50 +363,49 @@ flowchart TD
 
     queued   -->|"⚙ workspace ready / start plan"| planning
     planning -->|"⚙ write patch plan"| implementing
-
     implementing -->|"⚙ stage & finalize patch"| reviewing
-    reviewing    -->|"🤖 changes requested"| implementing
-    reviewing    -->|"🤖 approved"| testing
-
+    reviewing -->|"🤖 changes requested"| implementing
+    reviewing -->|"🤖 approved"| testing
     testing -->|"⚙ CI failed — send feedback"| implementing
     testing -->|"⚙ CI green, sync branch"| rebasing
-
     rebasing -->|"⚙ git rebase (clean/no-op) + verify"| ready
     rebasing -->|"⚙ rebase conflict + diff3 parse"| resolving_conflicts
     rebasing -->|"⚙ rebase failed / conflict threshold reached"| failed
 
-    queued       --> ap_cancel
-    planning     --> ap_cancel
+    resolving_conflicts -->|"🤖 resolve conflicts, git add, rebase --continue, tests pass"| ready
+    resolving_conflicts -->|"🤖 conflict resolution failed"| failed
+    resolving_conflicts -->|"⚙ tests failed after rebase recovery"| failed
+
+    queued --> ap_cancel
+    planning --> ap_cancel
     implementing --> ap_cancel
-    reviewing    --> ap_cancel
-    testing      --> ap_cancel
-    rebasing     --> ap_cancel
+    reviewing --> ap_cancel
+    testing --> ap_cancel
+    rebasing --> ap_cancel
     resolving_conflicts --> ap_cancel
-    ap_cancel    --> cancelled
+    ap_cancel --> cancelled
+
+    planning --> step_error
+    implementing --> step_error
+    reviewing --> step_error
+    testing --> step_error
+    step_error --> failed
 
     ready -->|"👤 ap approve (clean rebase + push; conflicts block)"| approved
     ready -->|"📋 auto_pr (clean rebase + push; conflicts block)"| approved
     ready -->|"👤 ap reject"| rejected
 
-    rebasing            --> resolving_conflicts
-    resolving_conflicts -->|"🤖 resolve conflicts, git add, rebase --continue, tests pass"| ready
-    resolving_conflicts -->|"🤖 conflict resolution failed"| failed
-    resolving_conflicts -->|"⚙ tests failed after rebase recovery"| failed
-
-    planning     --> step_error
-    implementing --> step_error
-    reviewing    --> step_error
-    testing      --> step_error
-    step_error   --> failed
-
-    failed    --> ap_retry
-    rejected  --> ap_retry
+    failed --> ap_retry
+    rejected --> ap_retry
     cancelled --> ap_retry
-    ap_retry  --> queued
-    </pre>
+    ap_retry --> queued
+      </pre>
+    </div>
   </div>
 
   <div class="instructions">
+    <span>Wheel to zoom</span>
+    <span>Drag empty area to pan</span>
     <span>Hover legend to filter</span>
     <span>Click action block to group</span>
     <span>Click state to isolate</span>
@@ -344,10 +424,10 @@ flowchart TD
       startOnLoad: false,
       theme: 'dark',
       flowchart: {
-        curve: 'basis',
-        padding: 16,
-        nodeSpacing: 30,
-        rankSpacing: 40,
+        curve: 'linear',
+        padding: 24,
+        nodeSpacing: 58,
+        rankSpacing: 120,
         useMaxWidth: false,
       },
       themeVariables: {
@@ -366,6 +446,29 @@ flowchart TD
 
     // ── Post-process: reposition cluster labels to top-left ──
     const svgEl = document.querySelector('#diagram-container svg');
+    const LANE_STYLES = {
+      'LANE A · CORE PIPELINE': {
+        fill: 'rgba(22, 72, 106, 0.20)',
+        stroke: '#2f81f7',
+        label: '#79c0ff',
+      },
+      'LANE B · CONFLICT RECOVERY': {
+        fill: 'rgba(110, 73, 15, 0.22)',
+        stroke: '#d29922',
+        label: '#e3b341',
+      },
+      'LANE C · SHARED ACTIONS': {
+        fill: 'rgba(19, 86, 44, 0.22)',
+        stroke: '#3fb950',
+        label: '#56d364',
+      },
+      'LANE D · TERMINAL STATES': {
+        fill: 'rgba(82, 24, 55, 0.20)',
+        stroke: '#db61a2',
+        label: '#f778ba',
+      }
+    };
+
     svgEl.querySelectorAll('.cluster').forEach(cluster => {
       const rect = cluster.querySelector('rect');
       if (!rect) return;
@@ -393,6 +496,14 @@ flowchart TD
       newLabel.style.letterSpacing = '0.08em';
       newLabel.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
       newLabel.classList.add('cluster-label-custom');
+
+      const laneStyle = LANE_STYLES[labelText.toUpperCase()];
+      if (laneStyle) {
+        rect.style.fill = laneStyle.fill;
+        rect.style.stroke = laneStyle.stroke;
+        rect.style.strokeWidth = '1.4px';
+        newLabel.style.fill = laneStyle.label;
+      }
 
       cluster.appendChild(newLabel);
     });
@@ -431,9 +542,149 @@ flowchart TD
       ap_retry:     'Retry action hub. Incoming from failed/rejected/cancelled; outgoing to queued.',
     };
 
-    // ── Post-process: classify edges by actor ──
+    // ── Viewport controls (vector zoom/pan via SVG viewBox) ──
     const container = document.getElementById('diagram-container');
     const svg = container.querySelector('svg');
+    const zoomInBtn = document.getElementById('zoom-in');
+    const zoomOutBtn = document.getElementById('zoom-out');
+    const zoomResetBtn = document.getElementById('zoom-reset');
+    const zoomLevel = document.getElementById('zoom-level');
+
+    const parseViewBox = (el) => {
+      const vb = (el.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number);
+      if (vb.length === 4 && vb.every(Number.isFinite)) {
+        return { x: vb[0], y: vb[1], width: vb[2], height: vb[3] };
+      }
+      const box = el.getBBox();
+      return { x: box.x, y: box.y, width: box.width, height: box.height };
+    };
+
+    const baseView = parseViewBox(svg);
+    const view = { ...baseView };
+    const MIN_ZOOM = 1;
+    const MAX_ZOOM = 5;
+    let isPanning = false;
+    let panPointerId = null;
+    let panStart = null;
+    let suppressBackgroundClick = false;
+
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const getZoom = () => baseView.width / view.width;
+
+    const clampView = () => {
+      const maxX = baseView.x + baseView.width - view.width;
+      const maxY = baseView.y + baseView.height - view.height;
+      view.x = clamp(view.x, baseView.x, maxX);
+      view.y = clamp(view.y, baseView.y, maxY);
+    };
+
+    const applyView = () => {
+      svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.width} ${view.height}`);
+      const zoomPct = Math.round(getZoom() * 100);
+      zoomLevel.textContent = `${zoomPct}%`;
+      const atBase = getZoom() <= (MIN_ZOOM + 1e-4);
+      zoomOutBtn.disabled = atBase;
+      zoomResetBtn.disabled = atBase;
+      zoomInBtn.disabled = getZoom() >= (MAX_ZOOM - 1e-4);
+    };
+
+    const zoomTo = (targetZoom, clientX, clientY) => {
+      const nextZoom = clamp(targetZoom, MIN_ZOOM, MAX_ZOOM);
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const px = clamp((clientX - rect.left) / rect.width, 0, 1);
+      const py = clamp((clientY - rect.top) / rect.height, 0, 1);
+      const anchorX = view.x + view.width * px;
+      const anchorY = view.y + view.height * py;
+
+      const nextWidth = baseView.width / nextZoom;
+      const nextHeight = baseView.height / nextZoom;
+      view.width = nextWidth;
+      view.height = nextHeight;
+      view.x = anchorX - nextWidth * px;
+      view.y = anchorY - nextHeight * py;
+      clampView();
+      applyView();
+    };
+
+    const zoomBy = (factor, clientX, clientY) => {
+      zoomTo(getZoom() * factor, clientX, clientY);
+    };
+
+    const resetZoom = () => {
+      view.x = baseView.x;
+      view.y = baseView.y;
+      view.width = baseView.width;
+      view.height = baseView.height;
+      applyView();
+    };
+
+    const containerCenter = () => {
+      const r = svg.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    };
+
+    zoomInBtn.addEventListener('click', () => {
+      const c = containerCenter();
+      zoomBy(1.2, c.x, c.y);
+    });
+    zoomOutBtn.addEventListener('click', () => {
+      const c = containerCenter();
+      zoomBy(1 / 1.2, c.x, c.y);
+    });
+    zoomResetBtn.addEventListener('click', resetZoom);
+
+    container.addEventListener('wheel', (e) => {
+      if (Math.abs(e.deltaY) < 0.2) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      zoomBy(factor, e.clientX, e.clientY);
+    }, { passive: false });
+
+    const isInteractiveTarget = (target) => !!target.closest('.node, g.edgeLabel, .edge-path');
+    svg.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (getZoom() <= (MIN_ZOOM + 1e-4)) return;
+      if (isInteractiveTarget(e.target)) return;
+      isPanning = true;
+      panPointerId = e.pointerId;
+      panStart = { clientX: e.clientX, clientY: e.clientY, x: view.x, y: view.y, moved: false };
+      try { svg.setPointerCapture(e.pointerId); } catch (_) {}
+      container.classList.add('panning');
+      e.preventDefault();
+    });
+
+    const endPan = (e) => {
+      if (!isPanning || e.pointerId !== panPointerId) return;
+      isPanning = false;
+      panPointerId = null;
+      container.classList.remove('panning');
+      if (panStart?.moved) suppressBackgroundClick = true;
+      panStart = null;
+      try {
+        if (svg.hasPointerCapture(e.pointerId)) svg.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    };
+
+    svg.addEventListener('pointermove', (e) => {
+      if (!isPanning || e.pointerId !== panPointerId || !panStart) return;
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const dxPx = e.clientX - panStart.clientX;
+      const dyPx = e.clientY - panStart.clientY;
+      const unitsPerPxX = view.width / rect.width;
+      const unitsPerPxY = view.height / rect.height;
+      view.x = panStart.x - dxPx * unitsPerPxX;
+      view.y = panStart.y - dyPx * unitsPerPxY;
+      clampView();
+      applyView();
+      if (Math.abs(dxPx) + Math.abs(dyPx) > 4) panStart.moved = true;
+    });
+    svg.addEventListener('pointerup', endPan);
+    svg.addEventListener('pointercancel', endPan);
+    resetZoom();
+
+    // ── Post-process: classify edges by actor ──
 
     // Collect top-level edge labels and paths (Mermaid also emits nested span.edgeLabel)
     const edgeLabels = Array.from(svg.querySelectorAll('g.edgeLabel'));
@@ -777,6 +1028,7 @@ flowchart TD
 
     // ── Click background to reset ──
     container.addEventListener('click', (e) => {
+      if (suppressBackgroundClick) { suppressBackgroundClick = false; return; }
       if (edgeClickHandled) { edgeClickHandled = false; return; }
       if (e.target.closest('.node')) return;
       clearHighlights();

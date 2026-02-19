@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -181,9 +182,11 @@ func TestValidTransitionsContract(t *testing.T) {
 			"queued":       {"planning", "cancelled"},
 			"planning":     {"implementing", "failed", "cancelled"},
 			"implementing": {"reviewing", "failed", "cancelled"},
-			"reviewing":    {"implementing", "testing", "failed", "cancelled"},
-			"testing":      {"ready", "implementing", "failed", "cancelled"},
-			"ready":        {"approved", "rejected"},
+			"reviewing":           {"implementing", "testing", "failed", "cancelled"},
+			"testing":             {"ready", "implementing", "rebasing", "failed", "cancelled"},
+			"rebasing":            {"resolving_conflicts", "ready", "failed", "cancelled"},
+			"resolving_conflicts": {"ready", "failed", "cancelled"},
+			"ready":               {"approved", "rejected"},
 			"failed":       {"queued"},
 			"rejected":     {"queued"},
 			"cancelled":    {"queued"},
@@ -288,6 +291,43 @@ func TestRecoverInFlightJobs(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
+	rebaseIssueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "4",
+		Title:         "rebase crash test",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("create rebase issue: %v", err)
+	}
+	rebaseJobID, err := store.CreateJob(ctx, rebaseIssueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create rebase job: %v", err)
+	}
+
+	conflictIssueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "5",
+		Title:         "resolving crash test",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("create resolving issue: %v", err)
+	}
+	resolvingJobID, err := store.CreateJob(ctx, conflictIssueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create resolving job: %v", err)
+	}
+
+	if _, err := store.Writer.ExecContext(ctx, `UPDATE jobs SET state = 'rebasing' WHERE id = ?`, rebaseJobID); err != nil {
+		t.Fatalf("seed rebasing job: %v", err)
+	}
+	if _, err := store.Writer.ExecContext(ctx, `UPDATE jobs SET state = 'resolving_conflicts' WHERE id = ?`, resolvingJobID); err != nil {
+		t.Fatalf("seed resolving_conflicts job: %v", err)
+	}
+
 	// Simulate in-flight: claim the job (queued -> planning).
 	_, err = store.ClaimJob(ctx)
 	if err != nil {
@@ -295,21 +335,180 @@ func TestRecoverInFlightJobs(t *testing.T) {
 	}
 
 	// Recover.
-	n, err := store.RecoverInFlightJobs(ctx)
+	n, err := store.RecoverInFlightJobs(ctx, tmp)
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 recovered, got %d", n)
+	if n != 3 {
+		t.Fatalf("expected 3 recovered, got %d", n)
 	}
 
-	// Job should be back to queued.
-	job, err := store.GetJob(ctx, jobID)
+	job1, err := store.GetJob(ctx, jobID)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("get planning job: %v", err)
 	}
-	if job.State != "queued" {
-		t.Fatalf("expected queued, got %s", job.State)
+	if job1.State != "queued" {
+		t.Fatalf("expected planning job queued, got %s", job1.State)
+	}
+
+	job2, err := store.GetJob(ctx, rebaseJobID)
+	if err != nil {
+		t.Fatalf("get rebasing job: %v", err)
+	}
+	if job2.State != "ready" {
+		t.Fatalf("expected rebasing job ready, got %s", job2.State)
+	}
+
+	job3, err := store.GetJob(ctx, resolvingJobID)
+	if err != nil {
+		t.Fatalf("get resolving_conflicts job: %v", err)
+	}
+	if job3.State != "ready" {
+		t.Fatalf("expected resolving job ready, got %s", job3.State)
+	}
+}
+
+func TestRecoverInFlightJobsCleansRebaseMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	rebaseFFID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "6",
+		Title:         "rebase recovery cleanup",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	resolvingFFID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "7",
+		Title:         "resolving recovery cleanup",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert resolving: %v", err)
+	}
+
+	rebaseJobID, err := store.CreateJob(ctx, rebaseFFID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create rebase job: %v", err)
+	}
+	resolvingJobID, err := store.CreateJob(ctx, resolvingFFID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create resolving job: %v", err)
+	}
+
+	rebaseWorktree := filepath.Join(tmp, "rebase-worktree")
+	resolvingWorktree := filepath.Join(tmp, "resolving-worktree")
+	if err := os.MkdirAll(filepath.Join(rebaseWorktree, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatalf("create rebase merge dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(rebaseWorktree, ".git", "rebase-apply"), 0o755); err != nil {
+		t.Fatalf("create rebase apply dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(resolvingWorktree, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatalf("create resolving merge dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(resolvingWorktree, ".git", "rebase-apply"), 0o755); err != nil {
+		t.Fatalf("create resolving apply dir: %v", err)
+	}
+
+	if _, err := store.Writer.ExecContext(ctx, `UPDATE jobs SET state='rebasing', worktree_path=? WHERE id = ?`, rebaseWorktree, rebaseJobID); err != nil {
+		t.Fatalf("seed rebasing job: %v", err)
+	}
+	if _, err := store.Writer.ExecContext(ctx, `UPDATE jobs SET state='resolving_conflicts', worktree_path=? WHERE id = ?`, resolvingWorktree, resolvingJobID); err != nil {
+		t.Fatalf("seed resolving job: %v", err)
+	}
+
+	n, err := store.RecoverInFlightJobs(ctx, tmp)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 recovered jobs, got %d", n)
+	}
+
+	if _, err := os.Stat(filepath.Join(rebaseWorktree, ".git", "rebase-merge")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale rebasing merge metadata removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rebaseWorktree, ".git", "rebase-apply")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale rebasing apply metadata removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(resolvingWorktree, ".git", "rebase-merge")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale resolving merge metadata removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(resolvingWorktree, ".git", "rebase-apply")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale resolving apply metadata removed, err=%v", err)
+	}
+}
+
+func TestRecoverInFlightJobsSkipsOutOfRootRebaseCleanup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+	outsideRoot := filepath.Join(filepath.Dir(tmp), "outside-repos")
+	if err := os.MkdirAll(outsideRoot, 0o755); err != nil {
+		t.Fatalf("create outside root: %v", err)
+	}
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ffid, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "gitlab",
+		SourceIssueID: "8",
+		Title:         "outside cleanup",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	rebaseJobID, err := store.CreateJob(ctx, ffid, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	outsideWorktree := filepath.Join(outsideRoot, "rebase-worktree")
+	if err := os.MkdirAll(filepath.Join(outsideWorktree, ".git", "rebase-merge"), 0o755); err != nil {
+		t.Fatalf("create outside rebase-merge: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(outsideWorktree, ".git", "rebase-apply"), 0o755); err != nil {
+		t.Fatalf("create outside rebase-apply: %v", err)
+	}
+	if _, err := store.Writer.ExecContext(ctx, `UPDATE jobs SET state='rebasing', worktree_path=? WHERE id = ?`, outsideWorktree, rebaseJobID); err != nil {
+		t.Fatalf("seed outside job: %v", err)
+	}
+
+	n, err := store.RecoverInFlightJobs(ctx, tmp)
+	if err != nil {
+		t.Fatalf("recover jobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 recovered job, got %d", n)
+	}
+
+	if _, err := os.Stat(filepath.Join(outsideWorktree, ".git", "rebase-merge")); err != nil {
+		t.Fatalf("expected outside rebase-merge to be untouched, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideWorktree, ".git", "rebase-apply")); err != nil {
+		t.Fatalf("expected outside rebase-apply to be untouched, got: %v", err)
 	}
 }
 

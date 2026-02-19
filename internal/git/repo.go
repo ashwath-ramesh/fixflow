@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -73,6 +74,11 @@ func PushBranch(ctx context.Context, dir, branchName string) error {
 	return runGit(ctx, dir, "push", "origin", branchName)
 }
 
+// PushBranchWithLease pushes a branch with --force-with-lease.
+func PushBranchWithLease(ctx context.Context, dir, branchName string) error {
+	return runGit(ctx, dir, "push", "origin", "--force-with-lease", branchName)
+}
+
 // PushBranchCaptured pushes a branch to origin without writing output to the
 // process stdout/stderr. Any git output is captured and included in errors.
 func PushBranchCaptured(ctx context.Context, dir, branchName string) error {
@@ -101,6 +107,33 @@ func runGit(ctx context.Context, dir string, args ...string) error {
 		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+func runGitOutputAndErr(ctx context.Context, dir string, args ...string) (string, string, error) {
+	return runGitOutputAndErrWithNoEditorSetting(ctx, dir, false, args...)
+}
+
+func runGitOutputAndErrWithNoEditor(ctx context.Context, dir string, args ...string) (string, string, error) {
+	return runGitOutputAndErrWithNoEditorSetting(ctx, dir, true, args...)
+}
+
+func runGitOutputAndErrWithNoEditorSetting(ctx context.Context, dir string, noEditor bool, args ...string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if noEditor {
+		cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return stdout.String(), stderr.String(), nil
+	}
+	return stdout.String(), stderr.String(), err
 }
 
 func runGitCaptured(ctx context.Context, dir string, args ...string) error {

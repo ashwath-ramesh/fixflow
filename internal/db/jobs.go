@@ -40,8 +40,14 @@ var ValidTransitions = func() map[string][]string {
 	registerTransition(transitions, "reviewing", "implementing", "testing", "failed", "cancelled")
 
 	// testing phase
-	// testing: automated checks are running; can pass to ready, request implementing fixes, or fail/cancel.
-	registerTransition(transitions, "testing", "ready", "implementing", "failed", "cancelled")
+	// testing: automated checks are running; can pass to rebasing (if rebase enabled), ready, request implementing fixes, or fail/cancel.
+	registerTransition(transitions, "testing", "ready", "implementing", "rebasing", "failed", "cancelled")
+
+	// rebase phase
+	// rebasing: branch is being rebased onto latest base. Clean rebase → ready, conflicts → resolving_conflicts, failure → failed.
+	registerTransition(transitions, "rebasing", "resolving_conflicts", "ready", "failed", "cancelled")
+	// resolving_conflicts: LLM-assisted conflict resolution. Success → ready, failure → failed.
+	registerTransition(transitions, "resolving_conflicts", "ready", "failed", "cancelled")
 
 	// completion phase
 	// ready: implementation appears complete and awaits approval decision.
@@ -59,7 +65,7 @@ var ValidTransitions = func() map[string][]string {
 // IsCancellableState reports whether a job can be cancelled.
 func IsCancellableState(state string) bool {
 	switch state {
-	case "queued", "planning", "implementing", "reviewing", "testing":
+	case "queued", "planning", "implementing", "reviewing", "testing", "rebasing", "resolving_conflicts":
 		return true
 	default:
 		return false
@@ -77,6 +83,10 @@ func StepForState(state string) string {
 		return "code_review"
 	case "testing":
 		return "tests"
+	case "rebasing":
+		return ""
+	case "resolving_conflicts":
+		return "conflict_resolution"
 	default:
 		return ""
 	}
@@ -93,6 +103,10 @@ func DisplayState(state, prMergedAt, prClosedAt string) string {
 	switch state {
 	case "ready":
 		return "needs pr"
+	case "rebasing":
+		return "rebasing"
+	case "resolving_conflicts":
+		return "resolving"
 	case "approved":
 		return "pr created"
 	default:
@@ -114,6 +128,10 @@ func DisplayStep(step string) string {
 		return "reviewing"
 	case "tests":
 		return "testing"
+	case "rebase":
+		return "rebasing"
+	case "conflict_resolution":
+		return "resolving conflicts"
 	case "approved":
 		return "approved"
 	case "merged":
@@ -221,6 +239,9 @@ func (s *Store) TransitionState(ctx context.Context, jobID, from, to string) err
 	var eventType string
 	switch to {
 	case "ready":
+		if from == "rebasing" || from == "resolving_conflicts" {
+			break
+		}
 		eventType = NotificationEventNeedsPR
 	case "failed":
 		eventType = NotificationEventFailed
@@ -318,7 +339,7 @@ WHERE 1=1`
 	if state != "" && state != "all" {
 		switch state {
 		case "active":
-			states := []string{"planning", "implementing", "reviewing", "testing"}
+			states := []string{"planning", "implementing", "reviewing", "testing", "rebasing", "resolving_conflicts"}
 			q += " AND j.state IN (" + strings.Repeat("?,", len(states)-1) + "?)"
 			for _, s := range states {
 				args = append(args, s)
@@ -374,13 +395,15 @@ CASE
     WHEN j.state = 'implementing' THEN 3
     WHEN j.state = 'reviewing' THEN 4
     WHEN j.state = 'testing' THEN 5
-    WHEN j.state = 'ready' THEN 6
-    WHEN j.state = 'approved' AND COALESCE(j.pr_merged_at, '') = '' THEN 7
-    WHEN j.state = 'merged' OR COALESCE(j.pr_merged_at, '') <> '' THEN 8
-    WHEN j.state = 'rejected' THEN 9
-    WHEN j.state = 'failed' THEN 10
-    WHEN j.state = 'cancelled' THEN 11
-    ELSE 12
+    WHEN j.state = 'rebasing' THEN 6
+    WHEN j.state = 'resolving_conflicts' THEN 7
+    WHEN j.state = 'ready' THEN 8
+    WHEN j.state = 'approved' AND COALESCE(j.pr_merged_at, '') = '' THEN 9
+    WHEN j.state = 'merged' OR COALESCE(j.pr_merged_at, '') <> '' THEN 10
+    WHEN j.state = 'rejected' THEN 11
+    WHEN j.state = 'failed' THEN 12
+    WHEN j.state = 'cancelled' THEN 13
+    ELSE 14
 END`
 	case "created_at":
 		return "j.created_at"
@@ -488,7 +511,7 @@ UPDATE jobs
 SET state = 'cancelled',
     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE id = ? AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')`, jobID)
+WHERE id = ? AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing', 'rebasing', 'resolving_conflicts')`, jobID)
 	if err != nil {
 		return fmt.Errorf("cancel job %s: %w", jobID, err)
 	}
@@ -515,7 +538,7 @@ UPDATE jobs
 SET state = 'cancelled',
     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-WHERE state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')
+WHERE state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing', 'rebasing', 'resolving_conflicts')
 RETURNING id`)
 	if err != nil {
 		return nil, fmt.Errorf("cancel all jobs: %w", err)
@@ -545,7 +568,7 @@ SET state = 'cancelled',
     completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 WHERE autopr_issue_id = ?
-  AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing')
+  AND state IN ('queued', 'planning', 'implementing', 'reviewing', 'testing', 'rebasing', 'resolving_conflicts')
 RETURNING id`, reason, autoprIssueID)
 	if err != nil {
 		return nil, fmt.Errorf("cancel jobs for issue %s: %w", autoprIssueID, err)

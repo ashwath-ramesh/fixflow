@@ -104,7 +104,7 @@ func TestRunStatusTableOutputUnchanged(t *testing.T) {
 	if lines[0] != "Daemon: stopped" {
 		t.Fatalf("unexpected daemon line: %q", lines[0])
 	}
-	if lines[1] != "Jobs: queued=1 planning=1 implementing=0 reviewing=0 testing=0 needs_pr=1 failed=0 cancelled=0 pr_created=1 merged=0 rejected=0" {
+	if lines[1] != "Jobs: queued=1 active=1 planning=1 implementing=0 reviewing=0 testing=0 rebasing=0 resolving=0 needs_pr=1 failed=0 cancelled=0 pr_created=1 merged=0 rejected=0" {
 		t.Fatalf("unexpected jobs line: %q", lines[1])
 	}
 }

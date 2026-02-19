@@ -27,6 +27,7 @@ func LoadTemplate(path string) string {
 func SanitizeIssueContent(s string) string {
 	s = stripHTML(s)
 	s = strings.TrimSpace(s)
+	s = neutralizeLLMDirectives(s)
 	if len(s) > maxPromptLen {
 		s = s[:maxPromptLen] + "\n... (truncated)"
 	}
@@ -34,9 +35,20 @@ func SanitizeIssueContent(s string) string {
 }
 
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+var promptInstructionRe = regexp.MustCompile(`(?im)(?i)^\s*(ignore|disregard|override|act as|do not|you are|system|assistant|developer|user)\b`)
 
 func stripHTML(s string) string {
 	return htmlTagRe.ReplaceAllString(s, "")
+}
+
+func neutralizeLLMDirectives(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if promptInstructionRe.MatchString(line) {
+			lines[i] = "> " + strings.TrimSpace(line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // BuildPrompt constructs a prompt from a template and variables.

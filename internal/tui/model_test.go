@@ -549,7 +549,7 @@ func TestFilterModeCycleStateAndProject(t *testing.T) {
 	modelAny, _ := m.handleKey(keyRunes('f'))
 	m = modelAny.(Model)
 
-	expectedStates := []string{"queued", "active", "ready", "failed", "merged", "rejected", "cancelled", "all"}
+	expectedStates := []string{"queued", "active", "rebasing", "resolving_conflicts", "ready", "failed", "merged", "rejected", "cancelled", "all"}
 	for _, state := range expectedStates {
 		modelAny, _ = m.handleKey(keyRunes('s'))
 		m = modelAny.(Model)

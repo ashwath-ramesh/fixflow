@@ -271,6 +271,7 @@ base_branch = "main"
   # plan = "/path/to/plan.md"
   # implement = "/path/to/implement.md"
   # code_review = "/path/to/code_review.md"
+  # conflict_resolve = "/path/to/conflict_resolve.md"
 
 # --- GitLab example ---
 # [[projects]]

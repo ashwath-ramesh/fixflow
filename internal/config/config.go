@@ -125,10 +125,12 @@ type NotificationsConfig struct {
 }
 
 const (
-	TriggerNeedsPR  = "needs_pr"
-	TriggerFailed   = "failed"
+	TriggerNeedsPR = "needs_pr"
+	TriggerFailed  = "failed"
 	TriggerPRCreated = "pr_created"
 	TriggerPRMerged  = "pr_merged"
+
+	DefaultMaxAutoResolvableConflictLines = 20
 )
 
 var defaultNotificationTriggers = []string{
@@ -139,15 +141,16 @@ var defaultNotificationTriggers = []string{
 }
 
 type ProjectConfig struct {
-	Name          string          `toml:"name"`
-	RepoURL       string          `toml:"repo_url"`
-	TestCmd       string          `toml:"test_cmd"`
-	BaseBranch    string          `toml:"base_branch"`
-	ExcludeLabels []string        `toml:"exclude_labels"`
-	GitLab        *ProjectGitLab  `toml:"gitlab"`
-	GitHub        *ProjectGitHub  `toml:"github"`
-	Sentry        *ProjectSentry  `toml:"sentry"`
-	Prompts       *ProjectPrompts `toml:"prompts"`
+	Name                            string          `toml:"name"`
+	RepoURL                         string          `toml:"repo_url"`
+	TestCmd                         string          `toml:"test_cmd"`
+	BaseBranch                      string          `toml:"base_branch"`
+	MaxAutoResolvableConflictLines  int             `toml:"max_auto_resolvable_conflict_lines"`
+	ExcludeLabels                   []string        `toml:"exclude_labels"`
+	GitLab                          *ProjectGitLab  `toml:"gitlab"`
+	GitHub                          *ProjectGitHub  `toml:"github"`
+	Sentry                          *ProjectSentry  `toml:"sentry"`
+	Prompts                         *ProjectPrompts `toml:"prompts"`
 }
 
 type ProjectGitLab struct {
@@ -188,6 +191,7 @@ type ProjectPrompts struct {
 	PlanReview string `toml:"plan_review"`
 	Implement  string `toml:"implement"`
 	CodeReview string `toml:"code_review"`
+	ConflictResolve string `toml:"conflict_resolve"`
 }
 
 func Load(path string) (*Config, error) {
@@ -278,6 +282,9 @@ func applyDefaults(cfg *Config) {
 	for i := range cfg.Projects {
 		if cfg.Projects[i].BaseBranch == "" {
 			cfg.Projects[i].BaseBranch = "main"
+		}
+		if cfg.Projects[i].MaxAutoResolvableConflictLines <= 0 {
+			cfg.Projects[i].MaxAutoResolvableConflictLines = DefaultMaxAutoResolvableConflictLines
 		}
 		if (cfg.Projects[i].GitHub != nil || cfg.Projects[i].GitLab != nil) && cfg.Projects[i].ExcludeLabels == nil {
 			cfg.Projects[i].ExcludeLabels = []string{DefaultExcludeLabel}
@@ -511,6 +518,9 @@ func resolvePaths(cfg *Config) {
 			}
 			if p.Prompts.CodeReview != "" {
 				p.Prompts.CodeReview = absPath(cfg.BaseDir, p.Prompts.CodeReview)
+			}
+			if p.Prompts.ConflictResolve != "" {
+				p.Prompts.ConflictResolve = absPath(cfg.BaseDir, p.Prompts.ConflictResolve)
 			}
 		}
 	}

@@ -216,6 +216,13 @@ func (r *Runner) runCodeReview(ctx context.Context, jobID string, issue db.Issue
 	return nil
 }
 
+func (r *Runner) runTestingAndReadiness(ctx context.Context, jobID string, issue db.Issue, projectCfg *config.ProjectConfig, workDir string) error {
+	if err := r.runTests(ctx, jobID, issue, projectCfg, workDir); err != nil {
+		return err
+	}
+	return r.runRebaseBeforeReady(ctx, jobID, issue, projectCfg, workDir)
+}
+
 func (r *Runner) runTests(ctx context.Context, jobID string, issue db.Issue, projectCfg *config.ProjectConfig, workDir string) error {
 	job, err := r.store.GetJob(ctx, jobID)
 	if err != nil {

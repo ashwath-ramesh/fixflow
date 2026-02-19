@@ -15,6 +15,7 @@ import (
 	"autopr/internal/config"
 	"autopr/internal/db"
 	"autopr/internal/git"
+	"autopr/internal/pipeline"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -35,18 +36,21 @@ var (
 	dotRunning    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")).Render("●")
 	dotStopped    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("●")
 	stateStyle    = map[string]lipgloss.Style{
-		"queued":       lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
-		"planning":     lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
-		"implementing": lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
-		"reviewing":    lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
-		"testing":      lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
-		"ready":        lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
-		"approved":     lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
-		"merged":       lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
-		"pr closed":    lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
-		"rejected":     lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
-		"failed":       lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
-		"cancelled":    lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		"queued":              lipgloss.NewStyle().Foreground(lipgloss.Color("246")),
+		"planning":            lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
+		"implementing":        lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
+		"reviewing":           lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+		"testing":             lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+		"ready":               lipgloss.NewStyle().Foreground(lipgloss.Color("46")),
+		"rebasing":            lipgloss.NewStyle().Foreground(lipgloss.Color("135")),
+		"resolving":           lipgloss.NewStyle().Foreground(lipgloss.Color("202")),
+		"resolving_conflicts": lipgloss.NewStyle().Foreground(lipgloss.Color("202")),
+		"approved":            lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
+		"merged":              lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
+		"pr closed":           lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
+		"rejected":            lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+		"failed":              lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+		"cancelled":           lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
 	}
 	sessStatusStyle = map[string]lipgloss.Style{
 		"running":   lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
@@ -71,6 +75,8 @@ var filterStateCycle = []string{
 	filterAllState,
 	"queued",
 	"active",
+	"rebasing",
+	"resolving_conflicts",
 	"ready",
 	"failed",
 	"merged",
@@ -113,10 +119,11 @@ type Model struct {
 	filterCursorBefore  int
 
 	// Level 2: job detail + session list
-	selected     *db.Job
-	sessions     []db.LLMSessionSummary
-	testArtifact *db.Artifact // test_output artifact (nil if tests haven't run)
-	sessCursor   int
+	selected       *db.Job
+	sessions       []db.LLMSessionSummary
+	testArtifact   *db.Artifact // test_output artifact (nil if tests haven't run)
+	rebaseArtifact *db.Artifact // rebase_result or rebase_conflict artifact
+	sessCursor     int
 
 	// Level 2: confirmation prompt and action feedback
 	confirmAction string // "approve", "reject", "retry", "cancel", or "" (none)
@@ -162,9 +169,10 @@ type jobsMsg struct {
 }
 type issueSummaryMsg db.IssueSyncSummary
 type sessionsMsg struct {
-	jobID        string
-	sessions     []db.LLMSessionSummary
-	testArtifact *db.Artifact
+	jobID          string
+	sessions       []db.LLMSessionSummary
+	testArtifact   *db.Artifact
+	rebaseArtifact *db.Artifact
 }
 type sessionMsg struct {
 	jobID   string
@@ -249,6 +257,11 @@ func (m Model) fetchSessions() tea.Msg {
 	msg := sessionsMsg{jobID: jobID, sessions: sessions}
 	if art, err := m.store.GetLatestArtifact(context.Background(), jobID, "test_output"); err == nil {
 		msg.testArtifact = &art
+	}
+	if art, err := m.store.GetLatestArtifact(context.Background(), jobID, "rebase_result"); err == nil {
+		msg.rebaseArtifact = &art
+	} else if art, err := m.store.GetLatestArtifact(context.Background(), jobID, "rebase_conflict"); err == nil {
+		msg.rebaseArtifact = &art
 	}
 	return msg
 }
@@ -362,17 +375,23 @@ func (m Model) executeApprove() tea.Msg {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("load issue: %w", err)}
 	}
 
+	proj, ok := m.cfg.ProjectByName(job.ProjectName)
+	if !ok {
+		return actionResultMsg{action: "approve", err: fmt.Errorf("project %q not found", job.ProjectName)}
+	}
+
+	// Rebase onto latest base branch before pushing.
+	if err := pipeline.RebaseBeforePush(ctx, m.store, job.ID, job.AutoPRIssueID, proj.BaseBranch, job.WorktreePath, job.Iteration); err != nil {
+		return actionResultMsg{action: "approve", err: fmt.Errorf("rebase before push: %w", err)}
+	}
+
 	// Push branch to remote before creating PR.
-	if err := git.PushBranchCaptured(ctx, job.WorktreePath, job.BranchName); err != nil {
+	if err := git.PushBranchWithLease(ctx, job.WorktreePath, job.BranchName); err != nil {
 		return actionResultMsg{action: "approve", err: fmt.Errorf("push branch: %w", err)}
 	}
 
 	prURL := job.PRURL
 	if prURL == "" {
-		proj, ok := m.cfg.ProjectByName(job.ProjectName)
-		if !ok {
-			return actionResultMsg{action: "approve", err: fmt.Errorf("project %q not found", job.ProjectName)}
-		}
 
 		prTitle, prBody := buildTUIPRContent(job, issue)
 		var prErr error
@@ -517,6 +536,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected = nil
 				m.sessions = nil
 				m.testArtifact = nil
+				m.rebaseArtifact = nil
 				m.sessCursor = 0
 				m.confirmAction = ""
 				m.confirmJobID = ""
@@ -534,9 +554,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.sessions = msg.sessions
 		m.testArtifact = msg.testArtifact
+		m.rebaseArtifact = msg.rebaseArtifact
 		// Clamp cursor rather than resetting so auto-refresh doesn't jump.
 		maxIdx := len(msg.sessions)
 		if msg.testArtifact != nil {
+			maxIdx++
+		}
+		if msg.rebaseArtifact != nil {
 			maxIdx++
 		}
 		if maxIdx > 0 && m.sessCursor >= maxIdx {
@@ -577,6 +601,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = nil
 			m.sessions = nil
 			m.testArtifact = nil
+			m.rebaseArtifact = nil
 			m.sessCursor = 0
 			return m, tea.Batch(m.fetchJobs, m.fetchIssueSummary)
 		}
@@ -886,6 +911,9 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 	if m.testArtifact != nil {
 		maxCursor++
 	}
+	if m.rebaseArtifact != nil {
+		maxCursor++
+	}
 	if m.selected != nil && m.selected.PRURL != "" {
 		maxCursor++
 	}
@@ -909,8 +937,12 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 			return m, m.fetchFullSession
 		}
 		testRowIdx := len(m.sessions)
-		prRowIdx := testRowIdx
+		rebaseRowIdx := testRowIdx
 		if m.testArtifact != nil {
+			rebaseRowIdx++
+		}
+		prRowIdx := rebaseRowIdx
+		if m.rebaseArtifact != nil {
 			prRowIdx++
 		}
 		mergedRowIdx := prRowIdx
@@ -923,6 +955,10 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		}
 		if m.testArtifact != nil && m.sessCursor == testRowIdx {
 			m = m.enterTestView()
+			return m, nil
+		}
+		if m.rebaseArtifact != nil && m.sessCursor == rebaseRowIdx {
+			m = m.enterRebaseView()
 			return m, nil
 		}
 		if m.selected != nil && m.selected.PRURL != "" && m.sessCursor == prRowIdx {
@@ -973,6 +1009,7 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		m.selected = nil
 		m.sessions = nil
 		m.testArtifact = nil
+		m.rebaseArtifact = nil
 		m.sessCursor = 0
 		m.confirmAction = ""
 		m.confirmJobID = ""
@@ -1093,6 +1130,45 @@ func (m Model) enterTestView() Model {
 	return m
 }
 
+// rebaseStatus derives the rebase step status from the current job state and artifact.
+func (m Model) rebaseStatus() string {
+	if m.selected == nil {
+		return "completed"
+	}
+	switch m.selected.State {
+	case "rebasing", "resolving_conflicts":
+		return "running"
+	case "failed":
+		if m.rebaseArtifact != nil && m.rebaseArtifact.Kind == "rebase_conflict" {
+			return "failed"
+		}
+		return "completed"
+	default:
+		return "completed"
+	}
+}
+
+// enterRebaseView enters Level 3 to display the rebase artifact output.
+func (m Model) enterRebaseView() Model {
+	provider := "git"
+	if m.rebaseArtifact.Kind == "rebase_conflict" {
+		provider = "llm"
+	}
+	m.selectedSession = &db.LLMSession{
+		Step:         "rebase",
+		Iteration:    m.rebaseArtifact.Iteration,
+		LLMProvider:  provider,
+		Status:       m.rebaseStatus(),
+		ResponseText: m.rebaseArtifact.Content,
+		PromptText:   "git rebase onto base branch",
+		CreatedAt:    m.rebaseArtifact.CreatedAt,
+	}
+	m.showInput = false
+	m.scrollOffset = 0
+	m.lines = splitContent(m.selectedSession.ResponseText, m.selectedSession.Status, m.cw())
+	return m
+}
+
 // enterMergedView enters Level 3 to display the PR merge details.
 func (m Model) enterMergedView() Model {
 	content := fmt.Sprintf("Pull request was merged.\n\n**Merged at:** %s\n\n**PR:** %s", formatTimestamp(m.selected.PRMergedAt), m.selected.PRURL)
@@ -1202,13 +1278,18 @@ func (m Model) listView() string {
 
 	// Job state counters.
 	counts := m.jobCounts()
-	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"]
+	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"] +
+		counts["rebasing"] + counts["resolving_conflicts"]
 	b.WriteString(fmt.Sprintf("  %s %d   %s %d   %s %d   %s %d   %s %d\n",
 		labelStyle.Render("queued"), counts["queued"],
 		labelStyle.Render("active"), active,
 		stateStyle["ready"].Render("ready"), counts["ready"],
 		stateStyle["failed"].Render("failed"), counts["failed"],
 		stateStyle["cancelled"].Render("cancelled"), counts["cancelled"],
+	))
+	b.WriteString(fmt.Sprintf("  %s %d   %s %d\n",
+		stateStyle["rebasing"].Render("rebasing"), counts["rebasing"],
+		stateStyle["resolving_conflicts"].Render("resolving"), counts["resolving_conflicts"],
 	))
 	if m.filterState != filterAllState || m.filterProject != filterAllProject {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  Filter: state=%s  project=%s\n",
@@ -1415,6 +1496,9 @@ func (m Model) detailView() string {
 	if m.testArtifact != nil {
 		stepCount++
 	}
+	if m.rebaseArtifact != nil {
+		stepCount++
+	}
 	if job.PRURL != "" {
 		stepCount++
 	}
@@ -1517,10 +1601,51 @@ func (m Model) detailView() string {
 			b.WriteString("\n")
 		}
 
+		// Rebase row (shows rebase result or conflict artifact).
+		if m.rebaseArtifact != nil {
+			rebaseIdx := len(m.sessions)
+			if m.testArtifact != nil {
+				rebaseIdx++
+			}
+			cursor := "  "
+			if rebaseIdx == m.sessCursor {
+				cursor = "> "
+			}
+
+			status := m.rebaseStatus()
+			sst, ok := sessStatusStyle[status]
+			if !ok {
+				sst = dimStyle
+			}
+
+			provider := "git"
+			if m.rebaseArtifact.Kind == "rebase_conflict" {
+				provider = "llm"
+			}
+
+			line := cursor +
+				padRight(fmt.Sprintf("%d", rebaseIdx+1), sColNum) +
+				padRight("rebasing", sColStep) +
+				sst.Render(padRight(status, sColStatus)) +
+				padRight(provider, sColProvider) +
+				padRight("-", sColTokens) +
+				dimStyle.Render(padRight(formatTimestamp(m.rebaseArtifact.CreatedAt), sColStart)) +
+				dimStyle.Render(padRight("-", sColDuration))
+
+			if rebaseIdx == m.sessCursor {
+				line = selectedStyle.Render(line)
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+
 		// PR row (shows when a PR/MR was created).
 		if job.PRURL != "" {
 			prIdx := len(m.sessions)
 			if m.testArtifact != nil {
+				prIdx++
+			}
+			if m.rebaseArtifact != nil {
 				prIdx++
 			}
 			cursor := "  "
@@ -1548,6 +1673,9 @@ func (m Model) detailView() string {
 		if job.PRMergedAt != "" {
 			mergedIdx := len(m.sessions)
 			if m.testArtifact != nil {
+				mergedIdx++
+			}
+			if m.rebaseArtifact != nil {
 				mergedIdx++
 			}
 			if job.PRURL != "" {
@@ -1578,6 +1706,9 @@ func (m Model) detailView() string {
 		if job.PRClosedAt != "" {
 			closedIdx := len(m.sessions)
 			if m.testArtifact != nil {
+				closedIdx++
+			}
+			if m.rebaseArtifact != nil {
 				closedIdx++
 			}
 			if job.PRURL != "" {
@@ -1664,15 +1795,27 @@ func (m Model) sessionView() string {
 	if sessNum == 0 && sess.Step == "tests" {
 		sessNum = len(m.sessions) + 1
 	}
+	if sessNum == 0 && sess.Step == "rebase" {
+		sessNum = len(m.sessions) + 1
+		if m.testArtifact != nil {
+			sessNum++
+		}
+	}
 	if sessNum == 0 && sess.Step == "approved" {
 		sessNum = len(m.sessions) + 1
 		if m.testArtifact != nil {
+			sessNum++
+		}
+		if m.rebaseArtifact != nil {
 			sessNum++
 		}
 	}
 	if sessNum == 0 && sess.Step == "merged" {
 		sessNum = len(m.sessions) + 1
 		if m.testArtifact != nil {
+			sessNum++
+		}
+		if m.rebaseArtifact != nil {
 			sessNum++
 		}
 		if m.selected != nil && m.selected.PRURL != "" {
@@ -1682,6 +1825,9 @@ func (m Model) sessionView() string {
 	if sessNum == 0 && sess.Step == "pr closed" {
 		sessNum = len(m.sessions) + 1
 		if m.testArtifact != nil {
+			sessNum++
+		}
+		if m.rebaseArtifact != nil {
 			sessNum++
 		}
 		if m.selected != nil && m.selected.PRURL != "" {

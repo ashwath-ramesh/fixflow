@@ -45,7 +45,7 @@ func Run(cfg *config.Config, foreground bool) error {
 	defer store.Close()
 
 	// Crash recovery: reset in-flight jobs.
-	recovered, err := store.RecoverInFlightJobs(context.Background())
+	recovered, err := store.RecoverInFlightJobs(context.Background(), cfg.ReposRoot)
 	if err != nil {
 		return fmt.Errorf("crash recovery: %w", err)
 	}

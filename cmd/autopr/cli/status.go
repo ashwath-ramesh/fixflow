@@ -135,8 +135,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Println("Daemon: stopped")
 	}
-	fmt.Printf("Jobs: queued=%d planning=%d implementing=%d reviewing=%d testing=%d needs_pr=%d failed=%d cancelled=%d pr_created=%d merged=%d rejected=%d\n",
-		counts["queued"], counts["planning"], counts["implementing"], counts["reviewing"],
-		counts["testing"], counts["ready"], counts["failed"], counts["cancelled"], prCreated, merged, counts["rejected"])
+	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"] + counts["rebasing"] + counts["resolving_conflicts"]
+
+	fmt.Printf("Jobs: queued=%d active=%d planning=%d implementing=%d reviewing=%d testing=%d rebasing=%d resolving=%d needs_pr=%d failed=%d cancelled=%d pr_created=%d merged=%d rejected=%d\n",
+		counts["queued"], active, counts["planning"], counts["implementing"], counts["reviewing"],
+		counts["testing"], counts["rebasing"], counts["resolving_conflicts"],
+		counts["ready"], counts["failed"], counts["cancelled"], prCreated, merged, counts["rejected"])
 	return nil
 }

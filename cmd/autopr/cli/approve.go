@@ -61,8 +61,13 @@ func runApprove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load issue: %w", err)
 	}
 
+	// Rebase onto latest base branch before pushing.
+	if err := pipeline.RebaseBeforePush(cmd.Context(), store, job.ID, job.AutoPRIssueID, proj.BaseBranch, job.WorktreePath, job.Iteration); err != nil {
+		return fmt.Errorf("rebase before push: %w", err)
+	}
+
 	// Push branch to remote before creating PR.
-	if err := git.PushBranch(cmd.Context(), job.WorktreePath, job.BranchName); err != nil {
+	if err := git.PushBranchWithLease(cmd.Context(), job.WorktreePath, job.BranchName); err != nil {
 		return fmt.Errorf("push branch: %w", err)
 	}
 
