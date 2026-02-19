@@ -296,29 +296,53 @@ session detail and diff views to avoid content jumping.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued
-    queued --> planning
-    planning --> implementing
-    implementing --> reviewing
-    reviewing --> implementing : changes requested
-    reviewing --> testing : approved
-    testing --> implementing : tests failed
-    testing --> ready : tests pass
-    queued --> cancelled : ap cancel
-    planning --> cancelled : ap cancel
-    implementing --> cancelled : ap cancel
-    reviewing --> cancelled : ap cancel
-    testing --> cancelled : ap cancel
-    ready --> approved : ap approve / auto_pr
-    ready --> rejected : ap reject
-    planning --> failed
-    implementing --> failed
-    reviewing --> failed
-    testing --> failed
-    failed --> queued : ap retry
-    rejected --> queued : ap retry
-    cancelled --> queued : ap retry
+    state "Intake" as intake {
+        queued
+        planning
+    }
+    state "Execution" as execution {
+        implementing
+        reviewing
+    }
+    state "Verification" as verification {
+        testing
+    }
+    state "Human gate" as human_gate {
+        ready
+    }
+    state "Terminal" as terminal {
+        approved
+        rejected
+        failed
+        cancelled
+    }
+
+    [*] --> queued : [daemon] job created
+    queued --> planning : [daemon] start planning
+    planning --> implementing : [daemon] plan complete
+    implementing --> reviewing : [daemon] implementation complete
+    reviewing --> implementing : [llm] changes requested
+    reviewing --> testing : [llm] approved
+    testing --> implementing : [daemon] tests failed
+    testing --> ready : [daemon] tests pass
+    queued --> cancelled : [user] ap cancel
+    planning --> cancelled : [user] ap cancel
+    implementing --> cancelled : [user] ap cancel
+    reviewing --> cancelled : [user] ap cancel
+    testing --> cancelled : [user] ap cancel
+    ready --> approved : [user] ap approve / [config] auto_pr
+    ready --> rejected : [user] ap reject
+    planning --> failed : [daemon] step error
+    implementing --> failed : [daemon] step error
+    reviewing --> failed : [daemon] step error
+    testing --> failed : [daemon] step error
+    failed --> queued : [user] ap retry
+    rejected --> queued : [user] ap retry
+    cancelled --> queued : [user] ap retry
 ```
+
+- Legend: `[daemon]` orchestration/system transition, `[llm]` model review decision, `[user]` CLI action, `[config]` config-driven automation.
+- Terminal states: `approved` is final; `failed`, `rejected`, and `cancelled` are terminal but retryable via `[user] ap retry`.
 
 ## Custom Prompts
 
