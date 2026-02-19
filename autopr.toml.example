@@ -55,6 +55,7 @@ base_branch = "main"
   # [projects.sentry]
   # org = "myorg"
   # project = "my-project"
+  # assigned_team = "autopr"  # optional: only process issues assigned to #autopr team
 
   # Override default LLM prompts with custom markdown files:
   # [projects.prompts]

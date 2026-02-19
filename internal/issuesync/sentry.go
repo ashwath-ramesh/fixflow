@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"autopr/internal/config"
@@ -24,7 +25,8 @@ func (s *Syncer) syncSentry(ctx context.Context, p *config.ProjectConfig) error 
 	project := p.Sentry.Project
 	baseURL := s.cfg.Sentry.BaseURL
 
-	baseAPIURL := fmt.Sprintf("%s/api/0/projects/%s/%s/issues/?query=is:unresolved&sort=date", baseURL, org, project)
+	query := sentryIssueQuery(p.Sentry.AssignedTeam)
+	baseAPIURL := fmt.Sprintf("%s/api/0/projects/%s/%s/issues/?query=%s&sort=date", baseURL, org, project, url.QueryEscape(query))
 
 	// Get cursor for pagination.
 	cursor, err := s.store.GetCursor(ctx, p.Name, "sentry")
@@ -115,6 +117,16 @@ func (s *Syncer) syncSentry(ctx context.Context, p *config.ProjectConfig) error 
 	}
 
 	return nil
+}
+
+// sentryIssueQuery builds the Sentry search query. When assignedTeam is set,
+// only issues assigned to that team are returned.
+func sentryIssueQuery(assignedTeam string) string {
+	query := "is:unresolved"
+	if team := strings.TrimSpace(assignedTeam); team != "" {
+		query += " assigned:#" + team
+	}
+	return query
 }
 
 type sentryIssue struct {

@@ -68,7 +68,7 @@ AutoPR needs a source of issues to work on. Configure at least one in `config.to
 
 - **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues automatically. Optionally set `include_labels = ["autopr"]` to only process labeled issues.
 - **GitLab** — add `[projects.gitlab]` with `project_id`, then create a webhook in GitLab pointing to `http://<your-host>:9847/webhook` with the Issue events trigger.
-- **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues automatically.
+- **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues automatically. Optionally set `assigned_team = "autopr"` to only process issues assigned to a specific Sentry team.
 
 See [Section 5](#5-setting-up-a-project) for full setup details.
 
@@ -249,6 +249,12 @@ ap notify --test --json
 
 1. Add `[projects.sentry]` with `org` and `project`.
 2. AutoPR polls for unresolved issues every `sync_interval`.
+3. Optional gating: set `assigned_team = "autopr"` to only process issues assigned to a Sentry team.
+4. To set this up in Sentry:
+   - Create a team (e.g. "autopr") under **Settings > Teams**.
+   - Grant the team access to the relevant projects.
+   - Assign individual issues or user feedback to `#autopr` via the assignee dropdown.
+5. Only issues assigned to the configured team are picked up. Empty `assigned_team` keeps current behavior (all unresolved issues).
 
 ## 6. CLI Commands
 
