@@ -353,6 +353,7 @@ func TestIssueHookLabelGateSkipsUnlabeled(t *testing.T) {
 
 func TestIssueHookLabelGateCreatesJobForLabeled(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 
 	store, err := db.Open(filepath.Join(t.TempDir(), "autopr.db"))
 	if err != nil {
