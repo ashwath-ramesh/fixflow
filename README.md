@@ -66,9 +66,11 @@ ap config                  # opens config in $EDITOR — add your projects
 
 AutoPR needs a source of issues to work on. Configure at least one in `config.toml`:
 
-- **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues automatically. Optionally set `include_labels = ["autopr"]` to only process labeled issues.
-- **GitLab** — add `[projects.gitlab]` with `project_id`, then create a webhook in GitLab pointing to `http://<your-host>:9847/webhook` with the Issue events trigger.
-- **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues automatically. Optionally set `assigned_team = "autopr"` to only process issues assigned to a specific Sentry team.
+- **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues and uses **labels** for gating. By default, only issues labeled `autopr` are processed.
+- **GitLab** — add `[projects.gitlab]` with `project_id`. AutoPR polls for open issues (and accepts webhooks) and uses **labels** for gating. By default, only issues labeled `autopr` are processed.
+- **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues and uses **team assignment** for gating. By default, only issues assigned to the `#autopr` team are processed.
+
+> **Safe defaults:** AutoPR will not process any issues until you label them `autopr` (GitHub/GitLab) or assign them to the `#autopr` team (Sentry). This prevents accidentally flooding the job queue on first start. Set `include_labels = []` or `assigned_team = ""` to opt out and process all issues.
 
 See [Section 5](#5-setting-up-a-project) for full setup details.
 
@@ -227,34 +229,38 @@ ap notify --test --json
 
 ## 5. Setting Up a Project
 
-### 5.1 GitHub (polling)
+### 5.1 GitHub (polling, label-gated)
 
 1. Add `[projects.github]` with `owner` and `repo`.
-2. Optional gating: set `include_labels = ["autopr"]` to only create jobs for matching issues.
-3. Matching is case-insensitive and uses ANY configured label.
-4. Empty `include_labels` keeps current behavior (all open issues are eligible).
-5. AutoPR polls for open issues every `sync_interval`.
-6. New eligible issues are picked up and processed automatically.
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`).
+3. Add the `autopr` label to any GitHub issue you want AutoPR to work on.
+4. Matching is case-insensitive and uses ANY configured label.
+5. To use a different label: set `include_labels = ["my-label"]`.
+6. To process ALL open issues (opt-out): set `include_labels = []`.
+7. AutoPR polls for open issues every `sync_interval`.
 
-### 5.2 GitLab (webhook-driven)
+### 5.2 GitLab (polling + webhook, label-gated)
 
 1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
-2. In GitLab, go to **Settings > Webhooks** and add:
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`).
+3. Add the `autopr` label to any GitLab issue you want AutoPR to work on.
+4. To use a different label: set `include_labels = ["my-label"]`.
+5. To process ALL open issues (opt-out): set `include_labels = []`.
+6. Optionally add a webhook in GitLab (**Settings > Webhooks**) for instant processing:
    - **URL:** `http://<your-host>:9847/webhook`
    - **Secret token:** same value as `AUTOPR_WEBHOOK_SECRET`
    - **Trigger:** Issue events
-3. When an issue is opened or reopened, AutoPR creates a job automatically.
 
-### 5.3 Sentry (polling)
+### 5.3 Sentry (polling, team-gated)
 
 1. Add `[projects.sentry]` with `org` and `project`.
-2. AutoPR polls for unresolved issues every `sync_interval`.
-3. Optional gating: set `assigned_team = "autopr"` to only process issues assigned to a Sentry team.
-4. To set this up in Sentry:
+2. **Default:** only issues assigned to the `#autopr` team are processed (`assigned_team` defaults to `"autopr"`).
+3. Set up the team in Sentry:
    - Create a team (e.g. "autopr") under **Settings > Teams**.
    - Grant the team access to the relevant projects.
    - Assign individual issues or user feedback to `#autopr` via the assignee dropdown.
-5. Only issues assigned to the configured team are picked up. Empty `assigned_team` keeps current behavior (all unresolved issues).
+4. To use a different team: set `assigned_team = "my-team"`.
+5. To process ALL unresolved issues (opt-out): set `assigned_team = ""`.
 
 ## 6. CLI Commands
 

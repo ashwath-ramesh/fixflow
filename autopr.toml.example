@@ -36,6 +36,23 @@ provider = "claude"  # claude or codex
 # triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
 # Set triggers = [] to disable all notifications.
 
+# ─── Issue Gating Defaults ───────────────────────────────────────────────────
+#
+# By default, AutoPR only processes issues that are explicitly opted-in:
+#
+#   GitHub / GitLab:  include_labels defaults to ["autopr"]
+#                     → only issues with the "autopr" label are processed
+#                     → set include_labels = [] to process ALL issues (opt-out)
+#
+#   Sentry:           assigned_team defaults to "autopr"
+#                     → only issues assigned to the #autopr team are processed
+#                     → set assigned_team = "" to process ALL issues (opt-out)
+#
+# These defaults prevent accidentally flooding the job queue with every open
+# issue on first start. Label an issue "autopr" (or assign to #autopr in
+# Sentry) when you want AutoPR to work on it.
+# ──────────────────────────────────────────────────────────────────────────────
+
 # Project definitions — add one [[projects]] block per project.
 [[projects]]
 name = "my-project"
@@ -46,17 +63,22 @@ base_branch = "main"
   [projects.gitlab]
   base_url = "https://gitlab.com"
   project_id = "12345"
-  # include_labels = ["autopr"]  # optional: ANY match; empty means all open issues
+  # include_labels = ["autopr"]  # DEFAULT — only issues labeled "autopr" are processed
+  # include_labels = ["bug"]     # custom: only process issues labeled "bug"
+  # include_labels = []           # opt-out: process ALL open issues (no label gating)
 
   # [projects.github]
   # owner = "myorg"
   # repo = "my-project"
-  # include_labels = ["autopr"]  # optional: ANY match; empty means all open issues
+  # include_labels = ["autopr"]  # DEFAULT — only issues labeled "autopr" are processed
+  # include_labels = []           # opt-out: process ALL open issues (no label gating)
 
   # [projects.sentry]
   # org = "myorg"
   # project = "my-project"
-  # assigned_team = "autopr"  # optional: only process issues assigned to #autopr team
+  # assigned_team = "autopr"     # DEFAULT — only issues assigned to #autopr team
+  # assigned_team = "my-team"    # custom: only issues assigned to #my-team
+  # assigned_team = ""            # opt-out: process ALL unresolved issues (no team gating)
 
   # Override default LLM prompts with custom markdown files:
   # [projects.prompts]

@@ -160,10 +160,20 @@ type ProjectGitHub struct {
 }
 
 type ProjectSentry struct {
-	Org          string `toml:"org"`
-	Project      string `toml:"project"`
-	AssignedTeam string `toml:"assigned_team"`
+	Org          string  `toml:"org"`
+	Project      string  `toml:"project"`
+	AssignedTeam *string `toml:"assigned_team"`
 }
+
+// DefaultIncludeLabel is the default label gate applied to GitHub and GitLab
+// issue sources when include_labels is not configured. Set include_labels = []
+// in config to explicitly disable label gating.
+const DefaultIncludeLabel = "autopr"
+
+// DefaultAssignedTeam is the default Sentry team gate applied when
+// assigned_team is not configured. Set assigned_team = "" in config to
+// explicitly disable team gating.
+const DefaultAssignedTeam = "autopr"
 
 type ProjectPrompts struct {
 	Plan       string `toml:"plan"`
@@ -260,6 +270,17 @@ func applyDefaults(cfg *Config) {
 	for i := range cfg.Projects {
 		if cfg.Projects[i].BaseBranch == "" {
 			cfg.Projects[i].BaseBranch = "main"
+		}
+		// Safe defaults: require "autopr" label/team unless explicitly overridden.
+		if cfg.Projects[i].GitHub != nil && cfg.Projects[i].GitHub.IncludeLabels == nil {
+			cfg.Projects[i].GitHub.IncludeLabels = []string{DefaultIncludeLabel}
+		}
+		if cfg.Projects[i].GitLab != nil && cfg.Projects[i].GitLab.IncludeLabels == nil {
+			cfg.Projects[i].GitLab.IncludeLabels = []string{DefaultIncludeLabel}
+		}
+		if cfg.Projects[i].Sentry != nil && cfg.Projects[i].Sentry.AssignedTeam == nil {
+			defaultTeam := DefaultAssignedTeam
+			cfg.Projects[i].Sentry.AssignedTeam = &defaultTeam
 		}
 	}
 }

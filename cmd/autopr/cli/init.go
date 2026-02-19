@@ -236,6 +236,11 @@ provider = "codex"              # codex|claude
 # triggers = ["awaiting_approval", "failed", "pr_created", "pr_merged"]
 # Set triggers = [] to disable all notifications.
 
+# Issue gating: by default, only issues labeled "autopr" (GitHub/GitLab) or
+# assigned to the #autopr team (Sentry) are processed. This prevents
+# accidentally flooding the queue. Set include_labels = [] or assigned_team = ""
+# to opt out and process all issues.
+
 # --- GitHub example ---
 [[projects]]
 name = "my-project"
@@ -246,11 +251,16 @@ base_branch = "main"
   [projects.github]
   owner = "org"
   repo = "repo"
-  # include_labels = ["autopr"]  # optional: ANY match; empty means all open issues
+  # include_labels defaults to ["autopr"] — label issues "autopr" to process them
+  # include_labels = ["bug"]    # custom: only process issues labeled "bug"
+  # include_labels = []          # opt-out: process ALL open issues
 
   # [projects.sentry]
   # org = "my-org"
   # project = "my-project"
+  # assigned_team defaults to "autopr" — assign issues to #autopr team to process them
+  # assigned_team = "my-team"   # custom: only issues assigned to #my-team
+  # assigned_team = ""           # opt-out: process ALL unresolved issues
 
   # Override default LLM prompts with custom markdown files:
   # [projects.prompts]
@@ -268,4 +278,5 @@ base_branch = "main"
 #   [projects.gitlab]
 #   base_url = "https://gitlab.com"   # change for self-hosted GitLab
 #   project_id = "12345"
+#   # include_labels defaults to ["autopr"] — label issues "autopr" to process them
 `
