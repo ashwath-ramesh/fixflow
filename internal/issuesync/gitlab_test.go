@@ -56,6 +56,52 @@ func TestSyncGitLabIssuesLabelGateSkipsUnlabeled(t *testing.T) {
 	}
 }
 
+func TestSyncGitLabIssuesLabelGateSkipsExcluded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	cfg := &config.Config{
+		Tokens: config.TokensConfig{GitLab: "test-token"},
+		Daemon: config.DaemonConfig{MaxIterations: 3},
+	}
+	project := &config.ProjectConfig{
+		Name:         "gl-project",
+		ExcludeLabels: []string{"autopr-skip"},
+		GitLab: &config.ProjectGitLab{
+			BaseURL:       "https://gitlab.com",
+			ProjectID:     "99",
+			IncludeLabels: []string{"autopr"},
+		},
+	}
+	syncer := NewSyncer(cfg, store, make(chan string, 8))
+
+	issues := []gitlabIssue{
+		{
+			IID:         2,
+			Title:       "excluded issue",
+			Description: "body",
+			WebURL:      "https://gitlab.com/group/repo/-/issues/2",
+			Labels:      []string{"AutoPR", "autopr-skip"},
+			UpdatedAt:   "2026-02-17T10:00:00Z",
+		},
+	}
+
+	syncer.syncGitLabPage(ctx, project, issues)
+
+	issue := getIssueBySourceID(t, ctx, store, "gl-project", "gitlab", "2")
+	if issue.Eligible {
+		t.Fatalf("expected issue to be excluded, got eligible")
+	}
+	if issue.SkipReason != "excluded labels: autopr-skip" {
+		t.Fatalf("unexpected skip reason: %q", issue.SkipReason)
+	}
+	if countJobs(t, ctx, store) != 0 {
+		t.Fatalf("expected no jobs for excluded gitlab issue")
+	}
+}
+
 func TestSyncGitLabIssuesLabelGateCreatesJobForLabeled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

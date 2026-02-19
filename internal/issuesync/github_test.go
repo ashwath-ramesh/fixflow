@@ -19,6 +19,7 @@ func TestEvaluateGitHubIssueEligibility(t *testing.T) {
 	tests := []struct {
 		name          string
 		includeLabels []string
+		excludeLabels []string
 		issueLabels   []string
 		wantEligible  bool
 		wantReason    string
@@ -40,12 +41,27 @@ func TestEvaluateGitHubIssueEligibility(t *testing.T) {
 			issueLabels:   []string{"bug"},
 			wantReason:    "missing required labels: autopr, ready",
 		},
+		{
+			name:          "excluded label wins over include match",
+			includeLabels: []string{"autopr", "ready"},
+			excludeLabels: []string{"skip", " AUTOPR-SKIP "},
+			issueLabels:   []string{"AUTOPR", "autopr-skip"},
+			wantEligible:  false,
+			wantReason:    "excluded labels: skip, autopr-skip",
+		},
+		{
+			name:          "excluded label skips issue",
+			excludeLabels: []string{"AUTOPR-SKIP", "bug"},
+			issueLabels:   []string{"Bug", "triage"},
+			wantEligible:  false,
+			wantReason:    "excluded labels: autopr-skip, bug",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := evaluateIssueEligibility(tc.includeLabels, tc.issueLabels, now)
+			got := evaluateIssueEligibility(tc.includeLabels, tc.excludeLabels, tc.issueLabels, now)
 			if got.Eligible != tc.wantEligible {
 				t.Fatalf("eligible: want %v got %v", tc.wantEligible, got.Eligible)
 			}
@@ -75,10 +91,11 @@ func TestSyncGitHubIssuesEligibilityTransitions(t *testing.T) {
 			Repo:          "repo",
 			IncludeLabels: []string{"autopr"},
 		},
+		ExcludeLabels: []string{"autopr-skip"},
 	}
 	syncer := NewSyncer(cfg, store, make(chan string, 8))
 
-	// Initial unlabeled issue: stored, no job.
+	// Initial excluded issue: stored, no job.
 	syncer.syncGitHubIssues(ctx, project, []githubIssue{
 		{
 			Number:    7,
@@ -86,7 +103,7 @@ func TestSyncGitHubIssuesEligibilityTransitions(t *testing.T) {
 			Body:      "body",
 			HTMLURL:   "https://github.com/org/repo/issues/7",
 			UpdatedAt: "2026-02-17T10:00:00Z",
-			Labels:    []githubLabel{{Name: "bug"}},
+			Labels:    []githubLabel{{Name: "autopr-skip"}},
 		},
 	})
 
@@ -94,14 +111,14 @@ func TestSyncGitHubIssuesEligibilityTransitions(t *testing.T) {
 	if issue.Eligible {
 		t.Fatalf("expected issue to be ineligible")
 	}
-	if issue.SkipReason != "missing required labels: autopr" {
+	if issue.SkipReason != "excluded labels: autopr-skip" {
 		t.Fatalf("unexpected skip reason: %q", issue.SkipReason)
 	}
 	if countJobs(t, ctx, store) != 0 {
-		t.Fatalf("expected no jobs for unlabeled issue")
+		t.Fatalf("expected no jobs for excluded issue")
 	}
 
-	// Ineligible -> eligible should create exactly one job.
+	// Excluded -> eligible should create exactly one job.
 	syncer.syncGitHubIssues(ctx, project, []githubIssue{
 		{
 			Number:    7,
@@ -136,7 +153,7 @@ func TestSyncGitHubIssuesEligibilityTransitions(t *testing.T) {
 		t.Fatalf("transition to failed: %v", err)
 	}
 
-	// Eligible -> ineligible should not create a new job; retry should be blocked.
+	// Eligible -> excluded should not create a new job; retry should be blocked.
 	syncer.syncGitHubIssues(ctx, project, []githubIssue{
 		{
 			Number:    7,
@@ -144,7 +161,7 @@ func TestSyncGitHubIssuesEligibilityTransitions(t *testing.T) {
 			Body:      "body",
 			HTMLURL:   "https://github.com/org/repo/issues/7",
 			UpdatedAt: "2026-02-17T10:08:00Z",
-			Labels:    []githubLabel{{Name: "bug"}},
+			Labels:    []githubLabel{{Name: "autopr"}, {Name: "autopr-skip"}},
 		},
 	})
 	if countJobs(t, ctx, store) != 1 {

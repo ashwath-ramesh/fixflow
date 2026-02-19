@@ -114,6 +114,7 @@ func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, 
 	if p.GitHub != nil {
 		includeLabels = p.GitHub.IncludeLabels
 	}
+	excludeLabels := p.ExcludeLabels
 
 	var latestUpdated string
 	for _, issue := range issues {
@@ -132,7 +133,7 @@ func (s *Syncer) syncGitHubIssues(ctx context.Context, p *config.ProjectConfig, 
 			labels = append(labels, l.Name)
 		}
 
-		eligibility := evaluateIssueEligibility(includeLabels, labels, time.Now().UTC())
+		eligibility := evaluateIssueEligibility(includeLabels, excludeLabels, labels, time.Now().UTC())
 		eligible := eligibility.Eligible
 		state := "open"
 		if issue.State == "closed" {

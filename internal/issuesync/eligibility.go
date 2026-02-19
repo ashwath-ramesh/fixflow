@@ -5,23 +5,23 @@ import (
 	"time"
 )
 
-type issueEligibility struct {
+type IssueEligibility struct {
 	Eligible    bool
 	SkipReason  string
 	EvaluatedAt string
 }
 
-func evaluateIssueEligibility(includeLabels, issueLabels []string, evaluatedAt time.Time) issueEligibility {
+type issueEligibility = IssueEligibility
+
+func evaluateIssueEligibility(includeLabels, excludeLabels, issueLabels []string, evaluatedAt time.Time) issueEligibility {
 	required := normalizeLabelSet(includeLabels)
+	excluded := normalizeLabelSet(excludeLabels)
 	if evaluatedAt.IsZero() {
 		evaluatedAt = time.Now().UTC()
 	}
 	result := issueEligibility{
 		Eligible:    true,
 		EvaluatedAt: evaluatedAt.UTC().Format(time.RFC3339),
-	}
-	if len(required) == 0 {
-		return result
 	}
 
 	issueSet := make(map[string]struct{}, len(issueLabels))
@@ -32,6 +32,17 @@ func evaluateIssueEligibility(includeLabels, issueLabels []string, evaluatedAt t
 		}
 		issueSet[normalized] = struct{}{}
 	}
+	for _, excludeLabel := range excluded {
+		if _, ok := issueSet[excludeLabel]; ok {
+			result.Eligible = false
+			result.SkipReason = "excluded labels: " + strings.Join(excluded, ", ")
+			return result
+		}
+	}
+
+	if len(required) == 0 {
+		return result
+	}
 	for _, requiredLabel := range required {
 		if _, ok := issueSet[requiredLabel]; ok {
 			return result
@@ -41,6 +52,10 @@ func evaluateIssueEligibility(includeLabels, issueLabels []string, evaluatedAt t
 	result.Eligible = false
 	result.SkipReason = "missing required labels: " + strings.Join(required, ", ")
 	return result
+}
+
+func EvaluateIssueEligibility(includeLabels, excludeLabels, issueLabels []string, evaluatedAt time.Time) IssueEligibility {
+	return evaluateIssueEligibility(includeLabels, excludeLabels, issueLabels, evaluatedAt)
 }
 
 func normalizeLabelSet(labels []string) []string {

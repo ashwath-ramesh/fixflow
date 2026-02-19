@@ -302,6 +302,7 @@ func TestIssueHookLabelGateSkipsUnlabeled(t *testing.T) {
 		Projects: []config.ProjectConfig{
 			{
 				Name: "test-project",
+				ExcludeLabels: []string{"autopr-skip"},
 				GitLab: &config.ProjectGitLab{
 					ProjectID:     "123",
 					IncludeLabels: []string{"autopr"},
@@ -312,8 +313,8 @@ func TestIssueHookLabelGateSkipsUnlabeled(t *testing.T) {
 	jobCh := make(chan string, 1)
 	srv := NewServer(cfg, store, jobCh)
 
-	// Send an issue with only "bug" label — should be skipped.
-	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(issueHookPayload(t, 123, 50, "open", "opened")))
+	// Send an issue with include + exclude labels — should be skipped.
+	req := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(issueHookPayloadWithLabels(t, 123, 50, "open", "opened", []string{"AutoPR", "autopr-skip"})))
 	req.Header.Set("X-Gitlab-Event", "Issue Hook")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -322,13 +323,25 @@ func TestIssueHookLabelGateSkipsUnlabeled(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
+	issueID := getWebhookIssueID(t, ctx, store, "test-project", "gitlab", "50")
+	issue, err := store.GetIssueByAPID(ctx, issueID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.Eligible {
+		t.Fatalf("expected webhook issue to be ineligible")
+	}
+	if issue.SkipReason != "excluded labels: autopr-skip" {
+		t.Fatalf("unexpected skip reason: %q", issue.SkipReason)
+	}
+
 	// No job should have been created.
 	var jobCount int
 	if err := store.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs`).Scan(&jobCount); err != nil {
 		t.Fatalf("count jobs: %v", err)
 	}
 	if jobCount != 0 {
-		t.Fatalf("expected no jobs for unlabeled webhook issue, got %d", jobCount)
+		t.Fatalf("expected no jobs for excluded webhook issue, got %d", jobCount)
 	}
 
 	select {
@@ -340,6 +353,7 @@ func TestIssueHookLabelGateSkipsUnlabeled(t *testing.T) {
 
 func TestIssueHookLabelGateCreatesJobForLabeled(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 
 	store, err := db.Open(filepath.Join(t.TempDir(), "autopr.db"))
 	if err != nil {
@@ -374,10 +388,30 @@ func TestIssueHookLabelGateCreatesJobForLabeled(t *testing.T) {
 
 	select {
 	case <-jobCh:
+		issueID := getWebhookIssueID(t, ctx, store, "test-project", "gitlab", "51")
+		issue, err := store.GetIssueByAPID(ctx, issueID)
+		if err != nil {
+			t.Fatalf("get issue: %v", err)
+		}
+		if !issue.Eligible {
+			t.Fatalf("expected webhook issue to be eligible")
+		}
 		// Job created as expected.
 	default:
 		t.Fatalf("expected job on channel for labeled webhook issue")
 	}
+}
+
+func getWebhookIssueID(t *testing.T, ctx context.Context, store *db.Store, project, source, sourceIssueID string) string {
+	t.Helper()
+	var issueID string
+	if err := store.Reader.QueryRowContext(ctx, `
+SELECT autopr_issue_id FROM issues
+WHERE project_name = ? AND source = ? AND source_issue_id = ?`, project, source, sourceIssueID,
+	).Scan(&issueID); err != nil {
+		t.Fatalf("query issue id: %v", err)
+	}
+	return issueID
 }
 
 func issueHookPayloadWithLabels(t *testing.T, projectID, iid int, action, state string, labels []string) []byte {

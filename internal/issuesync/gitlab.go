@@ -112,6 +112,7 @@ func (s *Syncer) syncGitLabPage(ctx context.Context, p *config.ProjectConfig, is
 	if p.GitLab != nil {
 		includeLabels = p.GitLab.IncludeLabels
 	}
+	excludeLabels := p.ExcludeLabels
 
 	var latestUpdated string
 	for _, issue := range issues {
@@ -123,7 +124,7 @@ func (s *Syncer) syncGitLabPage(ctx context.Context, p *config.ProjectConfig, is
 		labels := make([]string, 0, len(issue.Labels))
 		labels = append(labels, issue.Labels...)
 
-		eligibility := evaluateIssueEligibility(includeLabels, labels, time.Now().UTC())
+		eligibility := evaluateIssueEligibility(includeLabels, excludeLabels, labels, time.Now().UTC())
 		eligible := eligibility.Eligible
 
 		ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{

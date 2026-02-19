@@ -42,7 +42,10 @@ provider = "claude"  # claude or codex
 #
 #   GitHub / GitLab:  include_labels defaults to ["autopr"]
 #                     → only issues with the "autopr" label are processed
-#                     → set include_labels = [] to process ALL issues (opt-out)
+#                     → exclude_labels defaults to ["autopr-skip"]
+#                     → exclude wins if include and exclude labels both match
+#                     → set include_labels = [] and exclude_labels = []
+#                       to process ALL issues (opt-out)
 #
 #   Sentry:           assigned_team defaults to "autopr"
 #                     → only issues assigned to the #autopr team are processed
@@ -59,6 +62,9 @@ name = "my-project"
 repo_url = "https://gitlab.com/myorg/my-project.git"
 test_cmd = "make test"
 base_branch = "main"
+  # exclude_labels = ["autopr-skip"] # DEFAULT — issues labeled "autopr-skip" are skipped
+  # exclude_labels = ["blocked"]   # custom: skip issues labeled "blocked"
+  # exclude_labels = []           # opt-out: disable default skip gate
 
   [projects.gitlab]
   base_url = "https://gitlab.com"
