@@ -16,6 +16,7 @@ import (
 
 	"autopr/internal/config"
 	"autopr/internal/db"
+	"autopr/internal/issuesync"
 )
 
 const maxBodySize = 1 << 20 // 1MB
@@ -157,6 +158,15 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	includeLabels := []string(nil)
+	excludeLabels := projectCfg.ExcludeLabels
+	if projectCfg.GitLab != nil {
+		includeLabels = projectCfg.GitLab.IncludeLabels
+	}
+
+	labels := event.Labels()
+	eligibility := issuesync.EvaluateIssueEligibility(includeLabels, excludeLabels, labels, time.Now().UTC())
+
 	// Upsert issue.
 	ctx := r.Context()
 	sourceIssueID := fmt.Sprintf("%d", event.ObjectAttributes.IID)
@@ -164,6 +174,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if action == "close" {
 		state = "closed"
 	}
+	eligible := eligibility.Eligible
 	ffid, err := s.store.UpsertIssue(ctx, db.IssueUpsert{
 		ProjectName:   projectCfg.Name,
 		Source:        "gitlab",
@@ -172,7 +183,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		Body:          event.ObjectAttributes.Description,
 		URL:           event.ObjectAttributes.URL,
 		State:         state,
-		Labels:        event.Labels(),
+		Labels:        labels,
+		Eligible:      &eligible,
+		SkipReason:    eligibility.SkipReason,
+		EvaluatedAt:   eligibility.EvaluatedAt,
 	})
 	if err != nil {
 		slog.Error("webhook: upsert issue", "err", err)
@@ -202,15 +216,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check label eligibility.
-	if projectCfg.GitLab != nil && len(projectCfg.GitLab.IncludeLabels) > 0 {
-		if !hasMatchingLabel(projectCfg.GitLab.IncludeLabels, event.Labels()) {
-			slog.Info("webhook: issue skipped by label gate",
-				"project", projectCfg.Name,
-				"iid", event.ObjectAttributes.IID)
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
+	// Skip ineligible issues.
+	if !eligibility.Eligible {
+		slog.Info("webhook: issue skipped by label gate",
+			"project", projectCfg.Name,
+			"iid", event.ObjectAttributes.IID,
+			"skip_reason", eligibility.SkipReason)
+		w.WriteHeader(http.StatusAccepted)
+		return
 	}
 
 	// Check for existing active job.
@@ -264,23 +277,6 @@ func (s *Server) findProject(event gitlabIssueEvent) *config.ProjectConfig {
 func containsAPMarker(desc string) bool {
 	return strings.Contains(desc, "ap-id:") || strings.Contains(desc, "ap-sentry-issue:")
 }
-
-// hasMatchingLabel returns true if at least one of the issue labels matches
-// any of the required labels (case-insensitive).
-func hasMatchingLabel(required, issueLabels []string) bool {
-	issueSet := make(map[string]struct{}, len(issueLabels))
-	for _, l := range issueLabels {
-		issueSet[strings.ToLower(strings.TrimSpace(l))] = struct{}{}
-	}
-	for _, r := range required {
-		if _, ok := issueSet[strings.ToLower(strings.TrimSpace(r))]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// GitLab webhook payload types.
 
 type gitlabIssueEvent struct {
 	ObjectKind       string           `json:"object_kind"`

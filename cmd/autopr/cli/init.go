@@ -236,10 +236,10 @@ provider = "codex"              # codex|claude
 # triggers = ["needs_pr", "failed", "pr_created", "pr_merged"]
 # Set triggers = [] to disable all notifications.
 
-# Issue gating: by default, only issues labeled "autopr" (GitHub/GitLab) or
-# assigned to the #autopr team (Sentry) are processed. This prevents
-# accidentally flooding the queue. Set include_labels = [] or assigned_team = ""
-# to opt out and process all issues.
+# Issue gating: by default, only issues labeled "autopr" (GitHub/GitLab) are
+# processed, and issues labeled "autopr-skip" are skipped. Exclusion has precedence.
+# Set include_labels = [] and exclude_labels = [] to disable label gating entirely.
+# Sentry uses assigned_team = "autopr" and set assigned_team = "" to opt out.
 
 # --- GitHub example ---
 [[projects]]
@@ -251,14 +251,17 @@ base_branch = "main"
   [projects.github]
   owner = "org"
   repo = "repo"
-  # include_labels defaults to ["autopr"] — label issues "autopr" to process them
+  # include_labels defaults to ["autopr"] -- label issues "autopr" to process them
+  # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
   # include_labels = ["bug"]    # custom: only process issues labeled "bug"
+  # exclude_labels = ["blocked"] # custom: skip issues labeled "blocked"
   # include_labels = []          # opt-out: process ALL open issues
+  # exclude_labels = []          # opt-out: disable default skip label
 
   # [projects.sentry]
   # org = "my-org"
   # project = "my-project"
-  # assigned_team defaults to "autopr" — assign issues to #autopr team to process them
+  # assigned_team defaults to "autopr" -- assign issues to #autopr team to process them
   # assigned_team = "my-team"   # custom: only issues assigned to #my-team
   # assigned_team = ""           # opt-out: process ALL unresolved issues
 
@@ -278,5 +281,9 @@ base_branch = "main"
 #   [projects.gitlab]
 #   base_url = "https://gitlab.com"   # change for self-hosted GitLab
 #   project_id = "12345"
-#   # include_labels defaults to ["autopr"] — label issues "autopr" to process them
+#   # include_labels defaults to ["autopr"] -- label issues "autopr" to process them
+#   # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
+#   # exclude_labels = ["blocked"]    # custom: skip issues labeled "blocked"
+#   # include_labels = []             # opt-out: process ALL open issues
+#   # exclude_labels = []             # opt-out: disable default skip label
 `

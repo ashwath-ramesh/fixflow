@@ -326,6 +326,48 @@ test_cmd = "make test"
 	}
 }
 
+func TestLoadNormalizesExcludeLabels(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  exclude_labels = [" AUTOPR-SKIP ", "autopr-skip", "Bug", "bug"]
+  include_labels = ["autopr"]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p == nil {
+		t.Fatalf("expected github project")
+	}
+	got := p.ExcludeLabels
+	want := []string{"autopr-skip", "bug"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d labels, got %d: %#v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("label[%d]: want %q got %q", i, want[i], got[i])
+		}
+	}
+}
+
 func TestLoadFailsForEmptyGitHubIncludeLabel(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -351,6 +393,35 @@ test_cmd = "make test"
 		t.Fatalf("expected error")
 	}
 	if !strings.Contains(err.Error(), "include_labels") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadFailsForEmptyGitHubExcludeLabel(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  exclude_labels = ["autopr-skip", "   "]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "exclude_labels") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -520,6 +591,74 @@ test_cmd = "make test"
 	}
 }
 
+func TestLoadDefaultsExcludeLabelsForGitHub(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok {
+		t.Fatalf("expected github project")
+	}
+	want := []string{DefaultExcludeLabel}
+	if !reflect.DeepEqual(p.ExcludeLabels, want) {
+		t.Fatalf("expected default exclude_labels %v, got %v", want, p.ExcludeLabels)
+	}
+}
+
+func TestLoadDefaultsExcludeLabelsForGitLab(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://gitlab.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.gitlab]
+  base_url = "https://gitlab.com"
+  project_id = "123"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok {
+		t.Fatalf("expected gitlab project")
+	}
+	want := []string{DefaultExcludeLabel}
+	if !reflect.DeepEqual(p.ExcludeLabels, want) {
+		t.Fatalf("expected default exclude_labels %v, got %v", want, p.ExcludeLabels)
+	}
+}
+
 func TestLoadDefaultsAssignedTeamForSentry(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -589,6 +728,40 @@ test_cmd = "make test"
 	// Explicit empty list disables label gating (normalizeLabels converts [] to nil).
 	if p.GitHub.IncludeLabels != nil {
 		t.Fatalf("expected nil include_labels for explicit empty, got %v", p.GitHub.IncludeLabels)
+	}
+}
+
+func TestLoadExplicitEmptyExcludeLabelsDisablesGate(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  exclude_labels = []
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok {
+		t.Fatalf("expected github project")
+	}
+	if p.ExcludeLabels != nil {
+		t.Fatalf("expected nil exclude_labels for explicit empty, got %v", p.ExcludeLabels)
 	}
 }
 

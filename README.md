@@ -66,11 +66,11 @@ ap config                  # opens config in $EDITOR — add your projects
 
 AutoPR needs a source of issues to work on. Configure at least one in `config.toml`:
 
-- **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues and uses **labels** for gating. By default, only issues labeled `autopr` are processed.
-- **GitLab** — add `[projects.gitlab]` with `project_id`. AutoPR polls for open issues (and accepts webhooks) and uses **labels** for gating. By default, only issues labeled `autopr` are processed.
+- **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues and uses **labels** for gating. By default, only issues labeled `autopr` are processed, and `autopr-skip` skips processing.
+- **GitLab** — add `[projects.gitlab]` with `project_id`. AutoPR polls for open issues (and accepts webhooks) and uses **labels** for gating. By default, only issues labeled `autopr` are processed, and `autopr-skip` skips processing.
 - **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues and uses **team assignment** for gating. By default, only issues assigned to the `#autopr` team are processed.
 
-> **Safe defaults:** AutoPR will not process any issues until you label them `autopr` (GitHub/GitLab) or assign them to the `#autopr` team (Sentry). This prevents accidentally flooding the job queue on first start. Set `include_labels = []` or `assigned_team = ""` to opt out and process all issues.
+> **Safe defaults:** AutoPR will not process any issues until you label them `autopr` (GitHub/GitLab) or assign them to the `#autopr` team (Sentry). This prevents accidentally flooding the job queue on first start. Set `include_labels = []` and optionally `exclude_labels = []`, or `assigned_team = ""` to opt out and process all issues.
 
 See [Section 5](#5-setting-up-a-project) for full setup details.
 
@@ -169,7 +169,9 @@ base_branch = "main"
   [projects.github]
   owner = "org"
   repo = "repo"
-  # include_labels = ["autopr"] # optional: ANY match; empty means all open issues
+  # include_labels = ["autopr"] # optional: ANY match; empty means no include gate
+  # exclude_labels = ["autopr-skip"] # optional: issues with these labels are ignored
+  # exclude_labels = [] # optional: disable default skip label
 ```
 
 ### 4.1 File Locations
@@ -232,21 +234,26 @@ ap notify --test --json
 ### 5.1 GitHub (polling, label-gated)
 
 1. Add `[projects.github]` with `owner` and `repo`.
-2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`).
-3. Add the `autopr` label to any GitHub issue you want AutoPR to work on.
-4. Matching is case-insensitive and uses ANY configured label.
-5. To use a different label: set `include_labels = ["my-label"]`.
-6. To process ALL open issues (opt-out): set `include_labels = []`.
-7. AutoPR polls for open issues every `sync_interval`.
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]`).
+3. Exclusion has precedence: if an issue matches both include and exclude labels, it is skipped.
+4. Add the `autopr` label to any GitHub issue you want AutoPR to work on.
+5. Matching is case-insensitive and uses ANY configured label.
+6. To use a different include label: set `include_labels = ["my-label"]`.
+7. To use different skip labels: set `exclude_labels = ["on-hold"]`.
+8. To process ALL open issues (opt-out): set `include_labels = []` and `exclude_labels = []`.
+9. AutoPR polls for open issues every `sync_interval`.
 
 ### 5.2 GitLab (polling + webhook, label-gated)
 
 1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
-2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`).
-3. Add the `autopr` label to any GitLab issue you want AutoPR to work on.
-4. To use a different label: set `include_labels = ["my-label"]`.
-5. To process ALL open issues (opt-out): set `include_labels = []`.
-6. Optionally add a webhook in GitLab (**Settings > Webhooks**) for instant processing:
+2. **Default:** only issues with the `autopr` label are processed (`include_labels` defaults to `["autopr"]`) and issues with `autopr-skip` are excluded (`exclude_labels` defaults to `["autopr-skip"]`).
+3. Exclusion has precedence: if an issue matches both include and exclude labels, it is skipped.
+4. Add the `autopr` label to any GitLab issue you want AutoPR to work on.
+5. To use a different include label: set `include_labels = ["my-label"]`.
+6. To use different skip labels: set `exclude_labels = ["on-hold"]`.
+7. To process ALL open issues (opt-out): set `include_labels = []` and `exclude_labels = []`.
+8. GitLab webhooks still call the same gate rules used by the poller.
+9. Optionally add a webhook in GitLab (**Settings > Webhooks**) for instant processing:
    - **URL:** `http://<your-host>:9847/webhook`
    - **Secret token:** same value as `AUTOPR_WEBHOOK_SECRET`
    - **Trigger:** Issue events

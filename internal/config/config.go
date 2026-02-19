@@ -141,6 +141,7 @@ type ProjectConfig struct {
 	RepoURL    string          `toml:"repo_url"`
 	TestCmd    string          `toml:"test_cmd"`
 	BaseBranch string          `toml:"base_branch"`
+	ExcludeLabels []string     `toml:"exclude_labels"`
 	GitLab     *ProjectGitLab  `toml:"gitlab"`
 	GitHub     *ProjectGitHub  `toml:"github"`
 	Sentry     *ProjectSentry  `toml:"sentry"`
@@ -169,6 +170,7 @@ type ProjectSentry struct {
 // issue sources when include_labels is not configured. Set include_labels = []
 // in config to explicitly disable label gating.
 const DefaultIncludeLabel = "autopr"
+const DefaultExcludeLabel = "autopr-skip"
 
 // DefaultAssignedTeam is the default Sentry team gate applied when
 // assigned_team is not configured. Set assigned_team = "" in config to
@@ -270,6 +272,9 @@ func applyDefaults(cfg *Config) {
 	for i := range cfg.Projects {
 		if cfg.Projects[i].BaseBranch == "" {
 			cfg.Projects[i].BaseBranch = "main"
+		}
+		if (cfg.Projects[i].GitHub != nil || cfg.Projects[i].GitLab != nil) && cfg.Projects[i].ExcludeLabels == nil {
+			cfg.Projects[i].ExcludeLabels = []string{DefaultExcludeLabel}
 		}
 		// Safe defaults: require "autopr" label/team unless explicitly overridden.
 		if cfg.Projects[i].GitHub != nil && cfg.Projects[i].GitHub.IncludeLabels == nil {
@@ -373,6 +378,12 @@ func validate(cfg *Config) error {
 		if p.GitLab == nil && p.GitHub == nil && p.Sentry == nil {
 			return fmt.Errorf("project %q: at least one source (gitlab/github/sentry) is required", p.Name)
 		}
+		normalized, err := normalizeLabels(p.ExcludeLabels)
+		if err != nil {
+			return fmt.Errorf("project %q exclude_labels: %w", p.Name, err)
+		}
+		cfg.Projects[i].ExcludeLabels = normalized
+
 		if p.GitHub != nil {
 			normalized, err := normalizeLabels(p.GitHub.IncludeLabels)
 			if err != nil {
