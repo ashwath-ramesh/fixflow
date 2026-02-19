@@ -40,7 +40,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer store.Close()
 
-	jobs, err := store.ListJobs(cmd.Context(), listProject, listState)
+	jobs, err := store.ListJobs(cmd.Context(), listProject, listState, "updated_at", false)
 	if err != nil {
 		return err
 	}

@@ -1904,6 +1904,141 @@ func TestEnsureJobApproved(t *testing.T) {
 	}
 }
 
+func TestListJobsDefaultSortUpdatedAtDesc(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	jobOld := createTestJobWithOrderFields(t, ctx, store,
+		"sort-old", "myproject", "queued", "2025-02-01T10:00:00Z", "2025-02-01T11:00:00Z", "")
+	jobNew := createTestJobWithOrderFields(t, ctx, store,
+		"sort-new", "myproject", "queued", "2025-02-01T10:30:00Z", "2025-03-01T11:00:00Z", "")
+
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if got, want := len(jobs), 2; got != want {
+		t.Fatalf("expected %d jobs, got %d", want, got)
+	}
+	if jobs[0].ID != jobNew || jobs[1].ID != jobOld {
+		t.Fatalf("expected updated_at desc order, got %v, %v", jobs[0].ID, jobs[1].ID)
+	}
+}
+
+func TestListJobsSortByStateLogicalOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	queuedID := createTestJobWithOrderFields(t, ctx, store, "state-queued", "myproject", "queued", "2025-02-01T10:01:00Z", "2025-02-01T10:01:00Z", "")
+	planningID := createTestJobWithOrderFields(t, ctx, store, "state-planning", "myproject", "planning", "2025-02-01T10:02:00Z", "2025-02-01T10:02:00Z", "")
+	implementingID := createTestJobWithOrderFields(t, ctx, store, "state-implementing", "myproject", "implementing", "2025-02-01T10:03:00Z", "2025-02-01T10:03:00Z", "")
+	reviewingID := createTestJobWithOrderFields(t, ctx, store, "state-reviewing", "myproject", "reviewing", "2025-02-01T10:04:00Z", "2025-02-01T10:04:00Z", "")
+	testingID := createTestJobWithOrderFields(t, ctx, store, "state-testing", "myproject", "testing", "2025-02-01T10:05:00Z", "2025-02-01T10:05:00Z", "")
+	readyID := createTestJobWithOrderFields(t, ctx, store, "state-ready", "myproject", "ready", "2025-02-01T10:06:00Z", "2025-02-01T10:06:00Z", "")
+	approvedID := createTestJobWithOrderFields(t, ctx, store, "state-approved", "myproject", "approved", "2025-02-01T10:07:00Z", "2025-02-01T10:07:00Z", "")
+	mergedID := createTestJobWithOrderFields(t, ctx, store, "state-merged", "myproject", "approved", "2025-02-01T10:08:00Z", "2025-02-01T10:08:00Z", "2025-02-01T10:09:00Z")
+	rejectedID := createTestJobWithOrderFields(t, ctx, store, "state-rejected", "myproject", "rejected", "2025-02-01T10:10:00Z", "2025-02-01T10:10:00Z", "")
+	failedID := createTestJobWithOrderFields(t, ctx, store, "state-failed", "myproject", "failed", "2025-02-01T10:11:00Z", "2025-02-01T10:11:00Z", "")
+	cancelledID := createTestJobWithOrderFields(t, ctx, store, "state-cancelled", "myproject", "cancelled", "2025-02-01T10:12:00Z", "2025-02-01T10:12:00Z", "")
+
+	jobs, err := store.ListJobs(ctx, "", "all", "state", true)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+
+	expected := []string{
+		queuedID, planningID, implementingID, reviewingID, testingID, readyID,
+		approvedID, mergedID, rejectedID, failedID, cancelledID,
+	}
+	if got, want := len(jobs), len(expected); got != want {
+		t.Fatalf("expected %d jobs, got %d", want, got)
+	}
+	for i, id := range expected {
+		if jobs[i].ID != id {
+			t.Fatalf("expected state-sorted job at index %d to be %q, got %q", i, id, jobs[i].ID)
+		}
+	}
+	if jobs[7].PRMergedAt == "" {
+		t.Fatalf("expected merged row to carry pr_merged_at")
+	}
+}
+
+func TestListJobsSortByProject(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	projectA := createTestJobWithOrderFields(t, ctx, store, "project-a", "zulu", "queued", "2025-02-01T10:00:00Z", "2025-02-01T10:00:00Z", "")
+	projectB := createTestJobWithOrderFields(t, ctx, store, "project-b", "alpha", "queued", "2025-02-01T10:00:00Z", "2025-02-01T10:00:00Z", "")
+	projectC := createTestJobWithOrderFields(t, ctx, store, "project-c", "bravo", "queued", "2025-02-01T10:00:00Z", "2025-02-01T10:00:00Z", "")
+
+	jobs, err := store.ListJobs(ctx, "", "all", "project", true)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if got, want := len(jobs), 3; got != want {
+		t.Fatalf("expected %d jobs, got %d", want, got)
+	}
+	if jobs[0].ID != projectB || jobs[1].ID != projectC || jobs[2].ID != projectA {
+		t.Fatalf("expected project asc order alpha, bravo, zulu, got %v", []string{jobs[0].ID, jobs[1].ID, jobs[2].ID})
+	}
+}
+
+func TestListJobsSortByCreatedAtAscDesc(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	earliestID := createTestJobWithOrderFields(t, ctx, store, "created-old", "myproject", "queued", "2025-02-01T08:00:00Z", "2025-02-01T08:00:00Z", "")
+	middleID := createTestJobWithOrderFields(t, ctx, store, "created-mid", "myproject", "queued", "2025-02-01T09:00:00Z", "2025-02-01T09:00:00Z", "")
+	latestID := createTestJobWithOrderFields(t, ctx, store, "created-new", "myproject", "queued", "2025-02-01T10:00:00Z", "2025-02-01T10:00:00Z", "")
+
+	desc, err := store.ListJobs(ctx, "", "all", "created_at", false)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(desc) != 3 {
+		t.Fatalf("expected 3 jobs desc, got %d", len(desc))
+	}
+	if desc[0].ID != latestID || desc[1].ID != middleID || desc[2].ID != earliestID {
+		t.Fatalf("expected created_at desc order latest->oldest, got %v", []string{desc[0].ID, desc[1].ID, desc[2].ID})
+	}
+
+	asc, err := store.ListJobs(ctx, "", "all", "created_at", true)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if asc[0].ID != earliestID || asc[1].ID != middleID || asc[2].ID != latestID {
+		t.Fatalf("expected created_at asc order oldest->latest, got %v", []string{asc[0].ID, asc[1].ID, asc[2].ID})
+	}
+}
+
 func createTestJobWithState(t *testing.T, ctx context.Context, store *Store, sourceIssueID, state, branch, prURL, mergedAt, closedAt string) string {
 	t.Helper()
 	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
@@ -1927,6 +2062,33 @@ SET state = ?, branch_name = ?, pr_url = ?, pr_merged_at = ?, pr_closed_at = ?,
     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 WHERE id = ?`, state, branch, prURL, mergedAt, closedAt, jobID); err != nil {
 		t.Fatalf("configure job %s: %v", sourceIssueID, err)
+	}
+	return jobID
+}
+
+func createTestJobWithOrderFields(t *testing.T, ctx context.Context, store *Store, sourceIssueID, project, state, createdAt, updatedAt, prMergedAt string) string {
+	t.Helper()
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   project,
+		Source:        "github",
+		SourceIssueID: sourceIssueID,
+		Title:         sourceIssueID,
+		URL:           "https://github.com/org/repo/issues/" + sourceIssueID,
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue %s: %v", sourceIssueID, err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, project, 3)
+	if err != nil {
+		t.Fatalf("create job %s: %v", sourceIssueID, err)
+	}
+	_, err = store.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET state = ?, created_at = ?, updated_at = ?, pr_merged_at = ?
+WHERE id = ?`, state, createdAt, updatedAt, prMergedAt, jobID)
+	if err != nil {
+		t.Fatalf("set order fields for job %s: %v", sourceIssueID, err)
 	}
 	return jobID
 }

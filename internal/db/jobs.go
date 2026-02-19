@@ -273,7 +273,7 @@ FROM jobs WHERE id = ?`
 	return j, nil
 }
 
-func (s *Store) ListJobs(ctx context.Context, project, state string) ([]Job, error) {
+func (s *Store) ListJobs(ctx context.Context, project, state, orderBy string, ascending bool) ([]Job, error) {
 	q := `
 SELECT j.id, j.autopr_issue_id, j.project_name, j.state, j.iteration, j.max_iterations,
        COALESCE(j.worktree_path,''), COALESCE(j.branch_name,''), COALESCE(j.commit_sha,''),
@@ -293,7 +293,12 @@ WHERE 1=1`
 		q += ` AND j.state = ?`
 		args = append(args, state)
 	}
-	q += ` ORDER BY j.updated_at DESC`
+	orderExpr := resolveJobOrderExpression(orderBy)
+	direction := "DESC"
+	if ascending {
+		direction = "ASC"
+	}
+	q += fmt.Sprintf(` ORDER BY %s %s, j.id`, orderExpr, direction)
 
 	rows, err := s.Reader.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -317,6 +322,35 @@ WHERE 1=1`
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+func resolveJobOrderExpression(orderBy string) string {
+	switch orderBy {
+	case "project":
+		return "j.project_name"
+	case "state":
+		return `
+CASE
+    WHEN j.state = 'queued' THEN 1
+    WHEN j.state = 'planning' THEN 2
+    WHEN j.state = 'implementing' THEN 3
+    WHEN j.state = 'reviewing' THEN 4
+    WHEN j.state = 'testing' THEN 5
+    WHEN j.state = 'ready' THEN 6
+    WHEN j.state = 'approved' THEN 7
+    WHEN COALESCE(j.pr_merged_at, '') <> '' THEN 8
+    WHEN j.state = 'rejected' THEN 9
+    WHEN j.state = 'failed' THEN 10
+    WHEN j.state = 'cancelled' THEN 11
+    ELSE 12
+END`
+	case "created_at":
+		return "j.created_at"
+	case "updated_at":
+		fallthrough
+	default:
+		return "j.updated_at"
+	}
 }
 
 // UpdateJobField updates a single field on a job.
