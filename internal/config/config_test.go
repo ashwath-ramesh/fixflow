@@ -480,7 +480,7 @@ test_cmd = "make test"
 	if !ok || p.GitHub == nil {
 		t.Fatalf("expected github project")
 	}
-	want := []string{DefaultIncludeLabel}
+	want := []string{DefaultLabel}
 	if !reflect.DeepEqual(p.GitHub.IncludeLabels, want) {
 		t.Fatalf("expected default include_labels %v, got %v", want, p.GitHub.IncludeLabels)
 	}
@@ -514,7 +514,7 @@ test_cmd = "make test"
 	if !ok || p.GitLab == nil {
 		t.Fatalf("expected gitlab project")
 	}
-	want := []string{DefaultIncludeLabel}
+	want := []string{DefaultLabel}
 	if !reflect.DeepEqual(p.GitLab.IncludeLabels, want) {
 		t.Fatalf("expected default include_labels %v, got %v", want, p.GitLab.IncludeLabels)
 	}
