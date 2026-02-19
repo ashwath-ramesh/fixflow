@@ -580,3 +580,177 @@ func TestCancelOnReviewingStateJob(t *testing.T) {
 		t.Fatalf("expected cancelled, got %q", job.State)
 	}
 }
+
+func TestStartTimeFormattingHelpers(t *testing.T) {
+	t.Parallel()
+
+	const ts = "2025-02-19T14:32:05Z"
+	if got, want := tableStart(ts), "14:32:05"; got != want {
+		t.Fatalf("tableStart() = %q, want %q", got, want)
+	}
+	if got, want := detailStart(ts), "2025-02-19 14:32:05"; got != want {
+		t.Fatalf("detailStart() = %q, want %q", got, want)
+	}
+	if got, want := tableStart(""), "-"; got != want {
+		t.Fatalf("tableStart(empty) = %q, want %q", got, want)
+	}
+	if got, want := detailStart("bad-time"), "-"; got != want {
+		t.Fatalf("detailStart(bad) = %q, want %q", got, want)
+	}
+	if got, want := formatDuration(9100), "9s"; got != want {
+		t.Fatalf("formatDuration() = %q, want %q", got, want)
+	}
+}
+
+func TestDetailViewPipelineHeaderIncludesStartAndDuration(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:          "ap-job-1234",
+		State:       "implementing",
+		ProjectName: "proj",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{
+				ID:           1,
+				Step:         "plan",
+				Status:       "completed",
+				LLMProvider:  "codex",
+				InputTokens:  1,
+				OutputTokens: 2,
+				DurationMS:   3000,
+				CreatedAt:    "2025-02-19T14:32:05Z",
+			},
+		},
+	}
+
+	view := m.detailView()
+	var headerLine string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "PROVIDER") && strings.Contains(line, "TOKENS") {
+			headerLine = line
+			break
+		}
+	}
+	if headerLine == "" {
+		t.Fatalf("pipeline header line not found:\n%s", view)
+	}
+	for _, token := range []string{"#", "STATE", "STATUS", "PROVIDER", "TOKENS", "START", "DURATION"} {
+		if !strings.Contains(headerLine, token) {
+			t.Fatalf("expected pipeline header to contain %q, got:\n%s", token, headerLine)
+		}
+	}
+	if strings.Contains(headerLine, "TIME") {
+		t.Fatalf("did not expect TIME header, got:\n%s", headerLine)
+	}
+	if strings.Index(headerLine, "START") > strings.Index(headerLine, "DURATION") {
+		t.Fatalf("expected START before DURATION, got:\n%s", headerLine)
+	}
+}
+
+func TestDetailViewPipelineShowsStartTimesForRows(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:          "ap-job-1234",
+		State:       "approved",
+		ProjectName: "proj",
+		PRURL:       "https://example.com/pr/1",
+		CompletedAt: "2025-02-19T14:03:04Z",
+		PRMergedAt:  "2025-02-19T14:04:05Z",
+		PRClosedAt:  "2025-02-19T14:05:06Z",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{
+				ID:           1,
+				Step:         "plan",
+				Status:       "completed",
+				LLMProvider:  "codex",
+				InputTokens:  1,
+				OutputTokens: 2,
+				DurationMS:   3000,
+				CreatedAt:    "2025-02-19T14:01:02Z",
+			},
+		},
+		testArtifact: &db.Artifact{CreatedAt: "2025-02-19T14:02:03Z"},
+	}
+
+	view := m.detailView()
+	for _, want := range []string{"14:01:02", "14:02:03", "14:03:04", "14:04:05", "14:05:06"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected pipeline view to contain start time %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestSessionViewShowsStartTimeAboveDuration(t *testing.T) {
+	t.Parallel()
+
+	m := Model{
+		selectedSession: &db.LLMSession{
+			ID:           1,
+			Step:         "plan",
+			Iteration:    1,
+			Status:       "completed",
+			LLMProvider:  "codex",
+			InputTokens:  3,
+			OutputTokens: 5,
+			DurationMS:   11000,
+			CreatedAt:    "2025-02-19T14:32:05Z",
+		},
+		lines: []string{"ok"},
+	}
+
+	view := m.sessionView()
+	if !strings.Contains(view, "Start Time") || !strings.Contains(view, "2025-02-19 14:32:05") {
+		t.Fatalf("expected session metadata to include formatted Start Time:\n%s", view)
+	}
+	startIdx := strings.Index(view, "Start Time")
+	durIdx := strings.Index(view, "Duration")
+	if startIdx == -1 || durIdx == -1 || startIdx > durIdx {
+		t.Fatalf("expected Start Time to appear above Duration:\n%s", view)
+	}
+}
+
+func TestSyntheticSessionViewsCarryStartTimes(t *testing.T) {
+	t.Parallel()
+
+	base := Model{
+		cfg: &config.Config{},
+		selected: &db.Job{
+			ID:          "ap-job-1234",
+			ProjectName: "proj",
+			CompletedAt: "2025-02-19T14:03:04Z",
+			PRMergedAt:  "2025-02-19T14:04:05Z",
+			PRClosedAt:  "2025-02-19T14:05:06Z",
+		},
+		testArtifact: &db.Artifact{
+			CreatedAt: "2025-02-19T14:02:03Z",
+			Iteration: 1,
+		},
+	}
+
+	testView := base.enterTestView()
+	if got, want := testView.selectedSession.CreatedAt, "2025-02-19T14:02:03Z"; got != want {
+		t.Fatalf("test view created_at = %q, want %q", got, want)
+	}
+
+	prView := base.enterPRView()
+	if got, want := prView.selectedSession.CreatedAt, "2025-02-19T14:03:04Z"; got != want {
+		t.Fatalf("pr view created_at = %q, want %q", got, want)
+	}
+
+	mergedView := base.enterMergedView()
+	if got, want := mergedView.selectedSession.CreatedAt, "2025-02-19T14:04:05Z"; got != want {
+		t.Fatalf("merged view created_at = %q, want %q", got, want)
+	}
+
+	closedView := base.enterPRClosedView()
+	if got, want := closedView.selectedSession.CreatedAt, "2025-02-19T14:05:06Z"; got != want {
+		t.Fatalf("pr closed view created_at = %q, want %q", got, want)
+	}
+}

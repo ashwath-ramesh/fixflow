@@ -832,6 +832,7 @@ func (m Model) enterTestView() Model {
 		Status:       m.testStatus(),
 		ResponseText: m.testArtifact.Content,
 		PromptText:   testCmd,
+		CreatedAt:    m.testArtifact.CreatedAt,
 	}
 	m.showInput = false
 	m.scrollOffset = 0
@@ -848,6 +849,7 @@ func (m Model) enterMergedView() Model {
 		Status:       "completed",
 		ResponseText: content,
 		PromptText:   "(detected by sync loop)",
+		CreatedAt:    m.selected.PRMergedAt,
 	}
 	m.showInput = false
 	m.scrollOffset = 0
@@ -865,6 +867,7 @@ func (m Model) enterPRView() Model {
 		Status:       "completed",
 		ResponseText: content,
 		PromptText:   fmt.Sprintf("ap approve %s", db.ShortID(m.selected.ID)),
+		CreatedAt:    m.selected.CompletedAt,
 	}
 	m.showInput = false
 	m.scrollOffset = 0
@@ -881,6 +884,7 @@ func (m Model) enterPRClosedView() Model {
 		Status:       "completed",
 		ResponseText: content,
 		PromptText:   "(detected by sync loop)",
+		CreatedAt:    m.selected.PRClosedAt,
 	}
 	m.showInput = false
 	m.scrollOffset = 0
@@ -1138,6 +1142,8 @@ func (m Model) detailView() string {
 		sColStatus   = 12
 		sColProvider = 10
 		sColTokens   = 16
+		sColStart    = 10
+		sColDuration = 10
 	)
 
 	if stepCount == 0 {
@@ -1150,7 +1156,8 @@ func (m Model) detailView() string {
 			headerStyle.Render(padRight("STATUS", sColStatus)) +
 			headerStyle.Render(padRight("PROVIDER", sColProvider)) +
 			headerStyle.Render(padRight("TOKENS", sColTokens)) +
-			headerStyle.Render("TIME")
+			headerStyle.Render(padRight("START", sColStart)) +
+			headerStyle.Render("DURATION")
 		b.WriteString(header)
 		b.WriteString("\n")
 
@@ -1167,7 +1174,8 @@ func (m Model) detailView() string {
 
 			stepDisplay := db.DisplayStep(s.Step)
 			tokens := fmt.Sprintf("%d/%d", s.InputTokens, s.OutputTokens)
-			dur := fmt.Sprintf("%ds", s.DurationMS/1000)
+			start := tableStart(s.CreatedAt)
+			dur := formatDuration(s.DurationMS)
 
 			line := cursor +
 				padRight(fmt.Sprintf("%d", i+1), sColNum) +
@@ -1175,7 +1183,8 @@ func (m Model) detailView() string {
 				sst.Render(padRight(s.Status, sColStatus)) +
 				padRight(s.LLMProvider, sColProvider) +
 				padRight(tokens, sColTokens) +
-				dimStyle.Render(dur)
+				dimStyle.Render(padRight(start, sColStart)) +
+				dimStyle.Render(padRight(dur, sColDuration))
 
 			if i == m.sessCursor {
 				line = selectedStyle.Render(line)
@@ -1204,7 +1213,8 @@ func (m Model) detailView() string {
 				sst.Render(padRight(status, sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render("-")
+				dimStyle.Render(padRight(tableStart(m.testArtifact.CreatedAt), sColStart)) +
+				dimStyle.Render(padRight("-", sColDuration))
 
 			if testIdx == m.sessCursor {
 				line = selectedStyle.Render(line)
@@ -1230,7 +1240,8 @@ func (m Model) detailView() string {
 				sessStatusStyle["completed"].Render(padRight("completed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render("-")
+				dimStyle.Render(padRight(tableStart(job.CompletedAt), sColStart)) +
+				dimStyle.Render(padRight("-", sColDuration))
 
 			if prIdx == m.sessCursor {
 				line = selectedStyle.Render(line)
@@ -1259,7 +1270,8 @@ func (m Model) detailView() string {
 				stateStyle["merged"].Render(padRight("completed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render("-")
+				dimStyle.Render(padRight(tableStart(job.PRMergedAt), sColStart)) +
+				dimStyle.Render(padRight("-", sColDuration))
 
 			if mergedIdx == m.sessCursor {
 				line = selectedStyle.Render(line)
@@ -1291,7 +1303,8 @@ func (m Model) detailView() string {
 				stateStyle["pr closed"].Render(padRight("closed", sColStatus)) +
 				padRight("-", sColProvider) +
 				padRight("-", sColTokens) +
-				dimStyle.Render("-")
+				dimStyle.Render(padRight(tableStart(job.PRClosedAt), sColStart)) +
+				dimStyle.Render(padRight("-", sColDuration))
 
 			if closedIdx == m.sessCursor {
 				line = selectedStyle.Render(line)
@@ -1401,7 +1414,8 @@ func (m Model) sessionView() string {
 	kv("Status", sst.Render(sess.Status))
 	kv("Provider", sess.LLMProvider)
 	kv("Tokens", fmt.Sprintf("%d in / %d out", sess.InputTokens, sess.OutputTokens))
-	kv("Duration", fmt.Sprintf("%ds", sess.DurationMS/1000))
+	kv("Start Time", detailStart(sess.CreatedAt))
+	kv("Duration", formatDuration(sess.DurationMS))
 	if sess.ErrorMessage != "" {
 		kv("Error", lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(sess.ErrorMessage))
 	}
@@ -1578,6 +1592,44 @@ func scrollPercent(lines []string, offset, avail int) string {
 		return ""
 	}
 	return fmt.Sprintf("  [%d%%]", offset*100/mx)
+}
+
+func formatDuration(durationMS int) string {
+	if durationMS < 0 {
+		durationMS = 0
+	}
+	return fmt.Sprintf("%ds", durationMS/1000)
+}
+
+func parseTimestamp(ts string) (time.Time, bool) {
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	return t.UTC(), true
+}
+
+func tableStart(ts string) string {
+	t, ok := parseTimestamp(ts)
+	if !ok {
+		return "-"
+	}
+	return t.Format("15:04:05")
+}
+
+func detailStart(ts string) string {
+	t, ok := parseTimestamp(ts)
+	if !ok {
+		return "-"
+	}
+	return t.Format("2006-01-02 15:04:05")
 }
 
 func minInt(a, b int) int {
