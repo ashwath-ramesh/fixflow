@@ -324,7 +324,7 @@ session detail and diff views to avoid content jumping.
 
 ## 8. Job States
 
-See the **[interactive job state diagram](docs/job_state.html)** — hover, click, and filter by actor (daemon / user / LLM / config).
+See the **[interactive job state diagram](https://ashwath-ramesh.github.io/autopr/job_state.html)** — hover, click, and filter by actor (daemon / user / LLM / config).
 
 - **Actors:** `daemon` (automatic orchestration), `llm` (AI review decision), `user` (CLI action), `config` (auto_pr).
 - **Terminal states:** `approved` is final; `failed`, `rejected`, and `cancelled` are retryable via `ap retry`.
