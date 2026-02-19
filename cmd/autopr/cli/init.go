@@ -3,8 +3,10 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"autopr/internal/config"
@@ -125,10 +127,27 @@ func runGlobalInit() error {
 	defer store.Close()
 
 	fmt.Printf("Database initialized: %s\n", cfg.DBPath)
+	serviceInstalled, err := maybeInstallServiceFromInit(
+		runtime.GOOS,
+		reader,
+		os.Stdout,
+		cfg,
+		cfgFile,
+		installCurrentService,
+	)
+	if err != nil {
+		return fmt.Errorf("install service: %w", err)
+	}
+
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  1. Edit your config to add projects: ap config\n")
-	fmt.Printf("  2. Start the daemon:                 ap start\n")
-	fmt.Printf("  3. Start the TUI:                    ap tui\n")
+	if serviceInstalled {
+		fmt.Printf("  2. Check service status:             ap service status\n")
+		fmt.Printf("  3. Start the TUI:                    ap tui\n")
+	} else {
+		fmt.Printf("  2. Start the daemon:                 ap start\n")
+		fmt.Printf("  3. Start the TUI:                    ap tui\n")
+	}
 	return nil
 }
 
@@ -156,6 +175,32 @@ func runLocalInit() error {
 	fmt.Printf("Database initialized: %s\n", cfg.DBPath)
 	fmt.Println("Edit the config file to configure your projects, then run: ap start")
 	return nil
+}
+
+func maybeInstallServiceFromInit(
+	goos string,
+	reader *bufio.Reader,
+	out io.Writer,
+	cfg *config.Config,
+	cfgPath string,
+	installFn func(*config.Config, string) error,
+) (bool, error) {
+	if goos != "darwin" {
+		return false, nil
+	}
+
+	fmt.Fprint(out, "Install as system service (auto-start on login)? [y/N]: ")
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer != "y" && answer != "yes" {
+		return false, nil
+	}
+
+	if err := installFn(cfg, cfgPath); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(out, "Service installed: %s\n", "io.autopr.daemon")
+	return true, nil
 }
 
 const configTemplate = `# AutoPR configuration

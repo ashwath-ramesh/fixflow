@@ -49,6 +49,11 @@ ap config                  # opens config in $EDITOR — add your projects
 ### 3. Start the daemon
 
 ```bash
+# macOS (recommended always-on):
+ap service install
+ap service status
+
+# manual mode:
 ap start                   # background daemon
 ap start -f                # foreground (for debugging)
 ```
@@ -221,6 +226,9 @@ ap notify --test --json
 |---------|-------------|
 | `ap init` | Interactive setup wizard |
 | `ap start [-f]` | Start the daemon (`-f` for foreground) |
+| `ap service install` | Install + enable macOS launchd auto-start service |
+| `ap service uninstall` | Disable + remove macOS launchd service |
+| `ap service status` | Show macOS launchd service install/load/run state |
 | `ap upgrade [--check]` | Check for and install the latest `ap` release |
 | `ap stop` | Gracefully stop the daemon |
 | `ap status` | Show daemon status and job counts |
@@ -238,6 +246,7 @@ ap notify --test --json
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
 `ap start` checks for new releases at most once every 24h and prints a non-blocking upgrade notice when available.
+On macOS with `ap service install`, `ap stop` sends `SIGTERM` but launchd `KeepAlive` may restart it; run `ap service uninstall` to fully disable auto-start/restart.
 
 ### Job ID Prefix Matching
 
