@@ -452,6 +452,185 @@ test_cmd = "make test"
 	}
 }
 
+func TestLoadDefaultsIncludeLabelsForGitHub(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.GitHub == nil {
+		t.Fatalf("expected github project")
+	}
+	want := []string{DefaultIncludeLabel}
+	if !reflect.DeepEqual(p.GitHub.IncludeLabels, want) {
+		t.Fatalf("expected default include_labels %v, got %v", want, p.GitHub.IncludeLabels)
+	}
+}
+
+func TestLoadDefaultsIncludeLabelsForGitLab(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://gitlab.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.gitlab]
+  base_url = "https://gitlab.com"
+  project_id = "123"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.GitLab == nil {
+		t.Fatalf("expected gitlab project")
+	}
+	want := []string{DefaultIncludeLabel}
+	if !reflect.DeepEqual(p.GitLab.IncludeLabels, want) {
+		t.Fatalf("expected default include_labels %v, got %v", want, p.GitLab.IncludeLabels)
+	}
+}
+
+func TestLoadDefaultsAssignedTeamForSentry(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+
+  [projects.sentry]
+  org = "myorg"
+  project = "myproject"
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.Sentry == nil {
+		t.Fatalf("expected sentry project")
+	}
+	if p.Sentry.AssignedTeam == nil || *p.Sentry.AssignedTeam != DefaultAssignedTeam {
+		t.Fatalf("expected default assigned_team %q, got %v", DefaultAssignedTeam, p.Sentry.AssignedTeam)
+	}
+}
+
+func TestLoadExplicitEmptyIncludeLabelsDisablesGate(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+  include_labels = []
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.GitHub == nil {
+		t.Fatalf("expected github project")
+	}
+	// Explicit empty list disables label gating (normalizeLabels converts [] to nil).
+	if p.GitHub.IncludeLabels != nil {
+		t.Fatalf("expected nil include_labels for explicit empty, got %v", p.GitHub.IncludeLabels)
+	}
+}
+
+func TestLoadExplicitEmptyAssignedTeamDisablesGate(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "autopr.toml")
+
+	content := `
+[[projects]]
+name = "test"
+repo_url = "https://github.com/org/repo.git"
+test_cmd = "make test"
+
+  [projects.github]
+  owner = "org"
+  repo = "repo"
+
+  [projects.sentry]
+  org = "myorg"
+  project = "myproject"
+  assigned_team = ""
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	p, ok := cfg.ProjectByName("test")
+	if !ok || p.Sentry == nil {
+		t.Fatalf("expected sentry project")
+	}
+	// Explicit empty string disables team gating.
+	if p.Sentry.AssignedTeam == nil || *p.Sentry.AssignedTeam != "" {
+		t.Fatalf("expected empty assigned_team for explicit opt-out, got %v", p.Sentry.AssignedTeam)
+	}
+}
+
 func TestLoadFailsForInvalidNotificationURL(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

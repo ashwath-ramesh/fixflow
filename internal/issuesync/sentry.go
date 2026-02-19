@@ -25,7 +25,11 @@ func (s *Syncer) syncSentry(ctx context.Context, p *config.ProjectConfig) error 
 	project := p.Sentry.Project
 	baseURL := s.cfg.Sentry.BaseURL
 
-	query := sentryIssueQuery(p.Sentry.AssignedTeam)
+	var assignedTeam string
+	if p.Sentry.AssignedTeam != nil {
+		assignedTeam = *p.Sentry.AssignedTeam
+	}
+	query := sentryIssueQuery(assignedTeam)
 	baseAPIURL := fmt.Sprintf("%s/api/0/projects/%s/%s/issues/?query=%s&sort=date", baseURL, org, project, url.QueryEscape(query))
 
 	// Get cursor for pagination.
