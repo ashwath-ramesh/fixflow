@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"autopr/internal/db"
 	"autopr/internal/pipeline"
@@ -48,6 +49,9 @@ func (p *Pool) worker(ctx context.Context, id int) {
 	defer p.wg.Done()
 	slog.Debug("worker started", "id", id)
 
+	poll := time.NewTicker(5 * time.Second)
+	defer poll.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -58,6 +62,8 @@ func (p *Pool) worker(ctx context.Context, id int) {
 				return
 			}
 			p.processJob(ctx, id, notifiedJobID)
+		case <-poll.C:
+			p.processJob(ctx, id, "")
 		}
 	}
 }
