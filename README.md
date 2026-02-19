@@ -4,7 +4,23 @@ Autonomous issue-to-PR daemon. AutoPR watches your GitHub, GitLab, and Sentry is
 then uses an LLM (Claude or Codex CLI) to plan, implement, test, and push fixes — ready
 for human approval.
 
-## Install
+## Table of Contents
+
+1. [Install](#1-install)
+2. [Quick Start](#2-quick-start)
+3. [Prerequisites](#3-prerequisites)
+4. [Configuration](#4-configuration)
+5. [Setting Up a Project](#5-setting-up-a-project)
+6. [CLI Commands](#6-cli-commands)
+7. [TUI Dashboard](#7-tui-dashboard)
+8. [Job States](#8-job-states)
+9. [Custom Prompts](#9-custom-prompts)
+10. [Health Check](#10-health-check)
+11. [Architecture](#11-architecture)
+12. [Development](#12-development)
+13. [Resetting](#13-resetting)
+
+## 1. Install
 
 **macOS:**
 
@@ -25,9 +41,9 @@ ap upgrade --check
 go build -o ap ./cmd/autopr && mv ap /usr/local/bin/
 ```
 
-## Quick Start
+## 2. Quick Start
 
-### 1. Install an LLM CLI
+### 2.1 Install an LLM CLI
 
 AutoPR shells out to an LLM CLI tool. Pick one and install it:
 
@@ -39,14 +55,24 @@ npm install -g @openai/codex
 npm install -g @anthropic-ai/claude-code
 ```
 
-### 2. Set up AutoPR
+### 2.2 Set up AutoPR
 
 ```bash
 ap init                    # creates ~/.config/autopr/ with config + credentials
 ap config                  # opens config in $EDITOR — add your projects
 ```
 
-### 3. Start the daemon
+### 2.3 Connect your issues
+
+AutoPR needs a source of issues to work on. Configure at least one in `config.toml`:
+
+- **GitHub** — add `[projects.github]` with `owner` and `repo`. AutoPR polls for open issues automatically. Optionally set `include_labels = ["autopr"]` to only process labeled issues.
+- **GitLab** — add `[projects.gitlab]` with `project_id`, then create a webhook in GitLab pointing to `http://<your-host>:9847/webhook` with the Issue events trigger.
+- **Sentry** — add `[projects.sentry]` with `org` and `project`. AutoPR polls for unresolved issues automatically.
+
+See [Section 5](#5-setting-up-a-project) for full setup details.
+
+### 2.4 Start the daemon
 
 ```bash
 # macOS (recommended always-on):
@@ -58,7 +84,7 @@ ap start                   # background daemon
 ap start -f                # foreground (for debugging)
 ```
 
-### 4. Watch it work
+### 2.5 Watch it work
 
 ```bash
 ap tui                     # interactive dashboard
@@ -75,9 +101,9 @@ ap approve <job-id>        # approve and create PR
 3. You review the result with `ap tui` or `ap logs`, then `ap approve` or `ap reject`
 4. On approve, a PR is created. Set `auto_pr = true` to skip manual approval.
 
-## Prerequisites
+## 3. Prerequisites
 
-### LLM CLI Tool
+### 3.1 LLM CLI Tool
 
 AutoPR does not call LLM APIs directly. It shells out to a CLI in
 non-interactive mode and parses the output. You need one installed and authenticated:
@@ -94,7 +120,7 @@ Configure in `config.toml`:
 provider = "codex"   # or "claude"
 ```
 
-### Source Tokens
+### 3.2 Source Tokens
 
 | Source | Token type | Scopes |
 |--------|-----------|--------|
@@ -104,7 +130,7 @@ provider = "codex"   # or "claude"
 
 Set via `ap init` or env vars (`GITHUB_TOKEN`, `GITLAB_TOKEN`, `SENTRY_TOKEN`).
 
-## Configuration
+## 4. Configuration
 
 AutoPR uses `~/.config/autopr/config.toml`. Running `ap init` creates it interactively.
 
@@ -140,7 +166,7 @@ base_branch = "main"
   # include_labels = ["autopr"] # optional: ANY match; empty means all open issues
 ```
 
-### File Locations
+### 4.1 File Locations
 
 AutoPR follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/):
 
@@ -160,7 +186,7 @@ repos_root = "/custom/path/repos"
 log_file = "/custom/path/autopr.log"
 ```
 
-### Environment Variable Overrides
+### 4.2 Environment Variable Overrides
 
 | Env Var | Overrides |
 |---------|-----------|
@@ -173,7 +199,7 @@ log_file = "/custom/path/autopr.log"
 > scoped to the target repo. With read-only contents access, the daemon will work end-to-end but
 > branch push will fail — you'll need to push branches manually after approving jobs.
 
-### Notifications
+### 4.3 Notifications
 
 AutoPR emits notifications from a durable DB outbox when jobs hit key states:
 
@@ -195,9 +221,9 @@ ap notify --test
 ap notify --test --json
 ```
 
-## Setting Up a Project
+## 5. Setting Up a Project
 
-### GitHub (polling)
+### 5.1 GitHub (polling)
 
 1. Add `[projects.github]` with `owner` and `repo`.
 2. Optional gating: set `include_labels = ["autopr"]` to only create jobs for matching issues.
@@ -206,7 +232,7 @@ ap notify --test --json
 5. AutoPR polls for open issues every `sync_interval`.
 6. New eligible issues are picked up and processed automatically.
 
-### GitLab (webhook-driven)
+### 5.2 GitLab (webhook-driven)
 
 1. Add a `[[projects]]` block with `[projects.gitlab]` containing your `project_id`.
 2. In GitLab, go to **Settings > Webhooks** and add:
@@ -215,12 +241,12 @@ ap notify --test --json
    - **Trigger:** Issue events
 3. When an issue is opened or reopened, AutoPR creates a job automatically.
 
-### Sentry (polling)
+### 5.3 Sentry (polling)
 
 1. Add `[projects.sentry]` with `org` and `project`.
 2. AutoPR polls for unresolved issues every `sync_interval`.
 
-## CLI Commands
+## 6. CLI Commands
 
 | Command | Description |
 |---------|-------------|
@@ -248,7 +274,7 @@ All commands accept `--json` for machine-readable output and `-v` for debug logg
 `ap start` checks for new releases at most once every 24h and prints a non-blocking upgrade notice when available.
 On macOS with `ap service install`, `ap stop` sends `SIGTERM` but launchd `KeepAlive` may restart it; run `ap service uninstall` to fully disable auto-start/restart.
 
-### Job ID Prefix Matching
+### 6.1 Job ID Prefix Matching
 
 `ap list` shows an 8-character short job ID (e.g. `2dad8b6b`). All action commands
 accept a prefix of any length — just enough to be unambiguous:
@@ -261,7 +287,7 @@ ap reject 2dad8b6b    # full short ID also works
 
 For automation, use `ap list --json` which returns full job IDs.
 
-## TUI Dashboard
+## 7. TUI Dashboard
 
 `ap tui` launches an interactive terminal UI with keyboard navigation.
 
@@ -292,59 +318,14 @@ session detail and diff views to avoid content jumping.
 | `r` | Refresh immediately |
 | `q` | Quit |
 
-## Job States
+## 8. Job States
 
-```mermaid
-stateDiagram-v2
-    state "Intake" as intake {
-        queued
-        planning
-    }
-    state "Execution" as execution {
-        implementing
-        reviewing
-    }
-    state "Verification" as verification {
-        testing
-    }
-    state "Human gate" as human_gate {
-        ready
-    }
-    state "Terminal" as terminal {
-        approved
-        rejected
-        failed
-        cancelled
-    }
+See the **[interactive job state diagram](docs/job_state.html)** — hover, click, and filter by actor (daemon / user / LLM / config).
 
-    [*] --> queued : [daemon] job created
-    queued --> planning : [daemon] start planning
-    planning --> implementing : [daemon] plan complete
-    implementing --> reviewing : [daemon] implementation complete
-    reviewing --> implementing : [llm] changes requested
-    reviewing --> testing : [llm] approved
-    testing --> implementing : [daemon] tests failed
-    testing --> ready : [daemon] tests pass
-    queued --> cancelled : [user] ap cancel
-    planning --> cancelled : [user] ap cancel
-    implementing --> cancelled : [user] ap cancel
-    reviewing --> cancelled : [user] ap cancel
-    testing --> cancelled : [user] ap cancel
-    ready --> approved : [user] ap approve / [config] auto_pr
-    ready --> rejected : [user] ap reject
-    planning --> failed : [daemon] step error
-    implementing --> failed : [daemon] step error
-    reviewing --> failed : [daemon] step error
-    testing --> failed : [daemon] step error
-    failed --> queued : [user] ap retry
-    rejected --> queued : [user] ap retry
-    cancelled --> queued : [user] ap retry
-```
+- **Actors:** `daemon` (automatic orchestration), `llm` (AI review decision), `user` (CLI action), `config` (auto_pr).
+- **Terminal states:** `approved` is final; `failed`, `rejected`, and `cancelled` are retryable via `ap retry`.
 
-- Legend: `[daemon]` orchestration/system transition, `[llm]` model review decision, `[user]` CLI action, `[config]` config-driven automation.
-- Terminal states: `approved` is final; `failed`, `rejected`, and `cancelled` are terminal but retryable via `[user] ap retry`.
-
-## Custom Prompts
+## 9. Custom Prompts
 
 Override default LLM prompts per project with custom markdown files:
 
@@ -365,7 +346,7 @@ Prompt templates support these placeholders:
 | `{{review_feedback}}` | Previous review + test output |
 | `{{human_notes}}` | Human guidance from `ap retry -n` (plan step only) |
 
-## Health Check
+## 10. Health Check
 
 The daemon exposes a health endpoint on the webhook port:
 
@@ -375,7 +356,7 @@ curl http://localhost:9847/health
 
 Returns JSON with `status`, `uptime_seconds`, and `job_queue_depth`.
 
-## Architecture
+## 11. Architecture
 
 ```
 cmd/autopr/            CLI (cobra)
@@ -392,7 +373,7 @@ internal/
   worker/              Concurrent job processing pool
 ```
 
-## Development
+## 12. Development
 
 ```bash
 go build ./...
@@ -400,7 +381,7 @@ go vet ./...
 go test ./...
 ```
 
-## Resetting
+## 13. Resetting
 
 ```bash
 # Reset database only

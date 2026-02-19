@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoPR — Job States</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: #8b949e;
+      margin: 0.4rem 0 1.5rem;
+      font-size: 0.85rem;
+    }
+
+    /* ── Legend ── */
+    .legend {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+      border: 1.5px solid transparent;
+      font-size: 0.82rem;
+      font-weight: 500;
+      user-select: none;
+    }
+
+    .legend-item:hover, .legend-item.active {
+      border-color: currentColor;
+      background: rgba(255,255,255,0.04);
+    }
+
+    .legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+    }
+
+    .legend-item[data-actor="daemon"]  { color: #58a6ff; }
+    .legend-item[data-actor="user"]    { color: #3fb950; }
+    .legend-item[data-actor="llm"]     { color: #d29922; }
+    .legend-item[data-actor="config"]  { color: #8b949e; }
+
+    .legend-item[data-actor="daemon"]  .legend-dot { background: #58a6ff; }
+    .legend-item[data-actor="user"]    .legend-dot { background: #3fb950; }
+    .legend-item[data-actor="llm"]     .legend-dot { background: #d29922; }
+    .legend-item[data-actor="config"]  .legend-dot { background: #8b949e; }
+
+    /* ── Diagram wrapper ── */
+    #diagram-container {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 2rem;
+      width: 95vw;
+      max-width: 1400px;
+      overflow-x: auto;
+      position: relative;
+    }
+
+    #diagram-container svg {
+      width: 100% !important;
+      height: auto !important;
+      min-height: 60vh;
+    }
+
+    /* ── Tooltip ── */
+    #tooltip {
+      position: fixed;
+      background: #1c2128;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 0.55rem 0.75rem;
+      font-size: 0.78rem;
+      max-width: 260px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.12s;
+      z-index: 100;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      line-height: 1.45;
+    }
+
+    #tooltip.visible { opacity: 1; }
+
+    #tooltip .tt-state {
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+      color: #e6edf3;
+    }
+
+    #tooltip .tt-desc { color: #8b949e; }
+
+    /* ── Mermaid color overrides (applied via JS post-render) ── */
+
+    /* During filtering: dim everything, then un-dim matches */
+    #diagram-container.filtering svg .edge-path,
+    #diagram-container.filtering svg g.edgeLabel {
+      opacity: 0.06;
+      transition: opacity 0.2s;
+    }
+
+    #diagram-container.filtering svg .edge-path.hl,
+    #diagram-container.filtering svg g.edgeLabel.hl {
+      opacity: 1;
+    }
+
+    /* Also dim nodes during legend filtering */
+    #diagram-container.filtering svg .node,
+    #diagram-container.filtering svg .cluster {
+      opacity: 0.10;
+      transition: opacity 0.2s;
+    }
+
+    #diagram-container.filtering svg .node.hl,
+    #diagram-container.filtering svg .cluster.hl {
+      opacity: 1;
+    }
+
+    /* Node filtering (click a node) */
+    #diagram-container.node-filter svg .edge-path,
+    #diagram-container.node-filter svg g.edgeLabel {
+      opacity: 0.06;
+      transition: opacity 0.2s;
+    }
+
+    #diagram-container.node-filter svg .edge-path.hl,
+    #diagram-container.node-filter svg g.edgeLabel.hl {
+      opacity: 1;
+    }
+
+    #diagram-container.node-filter svg .node {
+      opacity: 0.15;
+      transition: opacity 0.2s;
+    }
+
+    #diagram-container.node-filter svg .node.hl {
+      opacity: 1;
+    }
+
+    #diagram-container.node-filter svg .cluster {
+      opacity: 0.10;
+      transition: opacity 0.2s;
+    }
+
+    #diagram-container.node-filter svg .cluster.hl {
+      opacity: 1;
+    }
+
+    /* Cursors */
+    svg .node { cursor: pointer; }
+    svg .node.human-command-node { filter: drop-shadow(0 0 0.2rem rgba(63,185,80,0.25)); }
+    svg g.edgeLabel { cursor: pointer; }
+    svg .edge-path { cursor: pointer; pointer-events: stroke; stroke-width: 8; }
+    svg .edge-path.edge-reentry { stroke-dasharray: 8 6; }
+
+    /* ── Instructions bar ── */
+    .instructions {
+      margin-top: 1.2rem;
+      display: flex;
+      gap: 1.5rem;
+      font-size: 0.75rem;
+      color: #484f58;
+    }
+
+    .instructions kbd {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 3px;
+      padding: 0.1rem 0.35rem;
+      font-family: inherit;
+      font-size: 0.7rem;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>AutoPR &mdash; Job State Machine</h1>
+  <p class="subtitle">Hover actor legend to filter &middot; Click action block (ap retry/ap cancel/step error) to group transitions &middot; Click a specific arrow for one transition</p>
+
+  <div class="legend">
+    <div class="legend-item" data-actor="daemon">
+      <span class="legend-dot"></span><span>Daemon &nbsp;(automatic)</span>
+    </div>
+    <div class="legend-item" data-actor="user">
+      <span class="legend-dot"></span><span>User &nbsp;(CLI action)</span>
+    </div>
+    <div class="legend-item" data-actor="llm">
+      <span class="legend-dot"></span><span>LLM &nbsp;(AI decision)</span>
+    </div>
+    <div class="legend-item" data-actor="config">
+      <span class="legend-dot"></span><span>Config &nbsp;(auto_pr)</span>
+    </div>
+  </div>
+  <div id="diagram-container">
+    <pre class="mermaid">
+flowchart TD
+    start(( )) -->|"⚙ job created"| queued
+
+    subgraph Intake
+        queued([queued])
+        planning([planning])
+    end
+
+    subgraph Execution
+        implementing([implementing])
+        reviewing([reviewing])
+    end
+
+    subgraph Verification
+        testing([testing])
+    end
+
+    subgraph Shared_Actions["Shared Actions"]
+        ap_cancel([👤 ap cancel])
+        step_error([step error])
+        ap_retry([👤 ap retry])
+    end
+
+    subgraph Human_Gate["Human Gate"]
+        ready([ready])
+    end
+
+    subgraph Terminal
+        approved([approved])
+        rejected([rejected])
+        failed([failed])
+        cancelled([cancelled])
+    end
+
+    queued   -->|"⚙ start planning"| planning
+    planning -->|"⚙ plan complete"| implementing
+
+    implementing -->|"⚙ impl complete"| reviewing
+    reviewing    -->|"🤖 changes requested"| implementing
+    reviewing    -->|"🤖 approved"| testing
+
+    testing -->|"⚙ tests failed"| implementing
+    testing -->|"⚙ tests pass"| ready
+
+    queued       --> ap_cancel
+    planning     --> ap_cancel
+    implementing --> ap_cancel
+    reviewing    --> ap_cancel
+    testing      --> ap_cancel
+    ap_cancel    --> cancelled
+
+    ready -->|"👤 ap approve"| approved
+    ready -->|"📋 auto_pr"| approved
+    ready -->|"👤 ap reject"| rejected
+
+    planning     --> step_error
+    implementing --> step_error
+    reviewing    --> step_error
+    testing      --> step_error
+    step_error   --> failed
+
+    failed    --> ap_retry
+    rejected  --> ap_retry
+    cancelled --> ap_retry
+    ap_retry  --> queued
+    </pre>
+  </div>
+
+  <div class="instructions">
+    <span>Hover legend to filter</span>
+    <span>Click action block to group</span>
+    <span>Click state to isolate</span>
+    <span>Click arrow to isolate one</span>
+    <span>Click background to reset</span>
+  </div>
+
+  <div id="tooltip">
+    <div class="tt-state"></div>
+    <div class="tt-desc"></div>
+  </div>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'dark',
+      flowchart: {
+        curve: 'basis',
+        padding: 16,
+        nodeSpacing: 30,
+        rankSpacing: 40,
+        useMaxWidth: false,
+      },
+      themeVariables: {
+        primaryColor:       '#21262d',
+        primaryTextColor:   '#c9d1d9',
+        primaryBorderColor: '#30363d',
+        lineColor:          '#484f58',
+        secondaryColor:     '#161b22',
+        tertiaryColor:      '#0d1117',
+        clusterBkg:         'rgba(33,38,45,0.5)',
+        clusterBorder:      '#30363d',
+      }
+    });
+
+    await mermaid.run();
+
+    // ── Post-process: reposition cluster labels to top-left ──
+    const svgEl = document.querySelector('#diagram-container svg');
+    svgEl.querySelectorAll('.cluster').forEach(cluster => {
+      const rect = cluster.querySelector('rect');
+      if (!rect) return;
+
+      // Extract the label text from whatever structure mermaid used
+      const label = cluster.querySelector('.cluster-label');
+      if (!label) return;
+      const labelText = label.textContent.trim();
+      if (!labelText) return;
+
+      // Hide the original label entirely
+      label.style.display = 'none';
+
+      // Create a new SVG text element at top-left of the cluster rect
+      const bbox = rect.getBBox();
+      const newLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      newLabel.textContent = labelText.toUpperCase();
+      newLabel.setAttribute('x', bbox.x + 10);
+      newLabel.setAttribute('y', bbox.y + 16);
+      newLabel.setAttribute('text-anchor', 'start');
+      newLabel.setAttribute('dominant-baseline', 'auto');
+      newLabel.style.fontSize = '11px';
+      newLabel.style.fontWeight = '700';
+      newLabel.style.fill = '#6e7681';
+      newLabel.style.letterSpacing = '0.08em';
+      newLabel.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+      newLabel.classList.add('cluster-label-custom');
+
+      cluster.appendChild(newLabel);
+    });
+
+    // ── Emoji-to-actor mapping ──
+    const ACTOR_MAP = {
+      '⚙': 'daemon',
+      '👤': 'user',
+      '🤖': 'llm',
+      '📋': 'config',
+    };
+
+    const ACTOR_COLORS = {
+      daemon: '#58a6ff',
+      user:   '#3fb950',
+      llm:    '#d29922',
+      config: '#8b949e',
+    };
+
+    // ── Node descriptions for tooltips ──
+    const NODE_DESC = {
+      queued:       'Job created and waiting for a worker. Next: planning begins automatically.',
+      planning:     'LLM analyzes the issue and produces an implementation plan.',
+      implementing: 'LLM writes code changes based on the plan (or review feedback).',
+      reviewing:    'LLM reviews its own code. May request changes or approve.',
+      testing:      'Runs the project test command. Passes → ready, fails → back to implement.',
+      ready:        'All checks passed. Waiting for human approval (or auto_pr).',
+      approved:     'PR created. Terminal state.',
+      rejected:     'Human rejected the job. Retryable via ap retry.',
+      failed:       'A pipeline step errored. Retryable via ap retry.',
+      cancelled:    'Cancelled by user. Retryable via ap retry.',
+      ap_cancel:    'Cancel action hub. Incoming from active states; outgoing to cancelled.',
+      step_error:   'System step error hub. Incoming from active states; outgoing to failed.',
+      ap_retry:     'Retry action hub. Incoming from failed/rejected/cancelled; outgoing to queued.',
+    };
+
+    // ── Post-process: classify edges by actor ──
+    const container = document.getElementById('diagram-container');
+    const svg = container.querySelector('svg');
+
+    // Collect top-level edge labels and paths (Mermaid also emits nested span.edgeLabel)
+    const edgeLabels = Array.from(svg.querySelectorAll('g.edgeLabel'));
+    const edgePaths  = Array.from(svg.querySelectorAll('.edge-pattern-solid, .flowchart-link'));
+
+    const edgePathById = new Map();
+    edgePaths.forEach(path => {
+      path.classList.add('edge-path');
+      const edgeId = path.getAttribute('data-id') || path.id || null;
+      if (edgeId) edgePathById.set(edgeId, path);
+    });
+
+    const STATE_IDS = new Set(['start', ...Object.keys(NODE_DESC)]);
+    const parseEdgeId = (edgeId) => {
+      if (!edgeId || !edgeId.startsWith('L_')) return null;
+      const withPair = edgeId.slice(2);
+      const lastUnderscore = withPair.lastIndexOf('_');
+      if (lastUnderscore < 1) return null;
+      const pair = withPair.slice(0, lastUnderscore);
+      for (const source of STATE_IDS) {
+        const prefix = source + '_';
+        if (!pair.startsWith(prefix)) continue;
+        const target = pair.slice(prefix.length);
+        if (STATE_IDS.has(target)) return { source, target };
+      }
+      return null;
+    };
+    const actorFromLabel = (text = '') => {
+      for (const [emoji, actor] of Object.entries(ACTOR_MAP)) {
+        if (text.includes(emoji)) return actor;
+      }
+      return null;
+    };
+    const isReentryEdge = (edge) => {
+      const byLabel = /ap retry|changes requested|tests failed/i.test(edge.labelText || '');
+      const byRoute = edge.source === 'ap_retry' || edge.target === 'ap_retry' ||
+                      (edge.source === 'reviewing' && edge.target === 'implementing') ||
+                      (edge.source === 'testing' && edge.target === 'implementing');
+      return byLabel || byRoute;
+    };
+
+    const edgeLabelById = new Map();
+    edgeLabels.forEach(label => {
+      const edgeId =
+        label.querySelector('.label')?.getAttribute('data-id') ||
+        label.getAttribute('data-id') ||
+        null;
+      if (edgeId && !edgeLabelById.has(edgeId)) edgeLabelById.set(edgeId, label);
+    });
+
+    // Build edge info from all path IDs (including unlabeled edges)
+    const edges = [];
+    const allEdgeIds = new Set([...edgePathById.keys(), ...edgeLabelById.keys()]);
+    allEdgeIds.forEach(edgeId => {
+      const label = edgeLabelById.get(edgeId) || null;
+      const path = edgePathById.get(edgeId) || null;
+      const text = label?.textContent || '';
+      const labelText = text.replace(/\s+/g, ' ').trim();
+      const parsed = parseEdgeId(edgeId);
+      if (!parsed) return;
+      edges.push({
+        label,
+        path,
+        edgeId,
+        source: parsed.source,
+        target: parsed.target,
+        text,
+        labelText,
+        actorHint: actorFromLabel(text),
+      });
+    });
+
+    // ── Extract edge connectivity from mermaid's internal data ──
+    // Mermaid flowchart edges have IDs like L_source_target_0.
+    const edgeConnections = []; // { source, target, actor, desc, labelEl, pathEl, edgeId }
+
+    // Parse from the known diagram structure (we know the exact edges)
+    const EDGE_DEFS = [
+      { source: 'start',        target: 'queued',       actor: 'daemon',  desc: 'A new issue is picked up from GitHub/GitLab/Sentry and a job is created.' },
+      { source: 'queued',       target: 'planning',     actor: 'daemon',  desc: 'A worker picks up the job and starts the planning step.' },
+      { source: 'planning',     target: 'implementing', actor: 'daemon',  desc: 'The LLM produced a plan. Now it writes the actual code changes.' },
+      { source: 'implementing', target: 'reviewing',    actor: 'daemon',  desc: 'Code is written. The LLM now reviews its own changes.' },
+      { source: 'reviewing',    target: 'implementing', actor: 'llm',     desc: 'The LLM review found issues and requested changes. Back to coding.' },
+      { source: 'reviewing',    target: 'testing',      actor: 'llm',     desc: 'The LLM approved its own code. Now run the test suite.' },
+      { source: 'testing',      target: 'implementing', actor: 'daemon',  desc: 'Tests failed. Goes back to implement with test output as feedback.' },
+      { source: 'testing',      target: 'ready',        actor: 'daemon',  desc: 'All tests pass. The job is ready for human review.' },
+      { source: 'queued',       target: 'ap_cancel',    actor: 'user',    desc: 'You ran "ap cancel" to stop this job before it started.' },
+      { source: 'planning',     target: 'ap_cancel',    actor: 'user',    desc: 'You ran "ap cancel" while the LLM was planning.' },
+      { source: 'implementing', target: 'ap_cancel',    actor: 'user',    desc: 'You ran "ap cancel" while the LLM was writing code.' },
+      { source: 'reviewing',    target: 'ap_cancel',    actor: 'user',    desc: 'You ran "ap cancel" during code review.' },
+      { source: 'testing',      target: 'ap_cancel',    actor: 'user',    desc: 'You ran "ap cancel" while tests were running.' },
+      { source: 'ap_cancel',    target: 'cancelled',    actor: 'user',    desc: 'Cancellation is applied and the job enters cancelled state.' },
+      { source: 'ready',        target: 'approved',     actor: 'user',    desc: 'You ran "ap approve" — a PR will be created and pushed.' },
+      { source: 'ready',        target: 'approved',     actor: 'config',  match: 'auto_pr', desc: 'auto_pr is enabled in config — PR is created automatically, no human step.' },
+      { source: 'ready',        target: 'rejected',     actor: 'user',    desc: 'You ran "ap reject" — the changes are discarded. Retryable.' },
+      { source: 'planning',     target: 'step_error',   actor: 'daemon',  desc: 'The planning step hit an error (e.g. LLM crash, timeout).' },
+      { source: 'implementing', target: 'step_error',   actor: 'daemon',  desc: 'Implementation hit an error (e.g. LLM crash, timeout).' },
+      { source: 'reviewing',    target: 'step_error',   actor: 'daemon',  desc: 'Code review step hit an error (e.g. LLM crash, timeout).' },
+      { source: 'testing',      target: 'step_error',   actor: 'daemon',  desc: 'Max implement↔review iterations reached. Needs human help.' },
+      { source: 'step_error',   target: 'failed',       actor: 'daemon',  desc: 'Step error is applied and the job enters failed state.' },
+      { source: 'failed',       target: 'ap_retry',     actor: 'user',    desc: 'You ran "ap retry" on a failed job.' },
+      { source: 'rejected',     target: 'ap_retry',     actor: 'user',    desc: 'You ran "ap retry" on a rejected job.' },
+      { source: 'cancelled',    target: 'ap_retry',     actor: 'user',    desc: 'You ran "ap retry" on a cancelled job.' },
+      { source: 'ap_retry',     target: 'queued',       actor: 'user',    desc: 'Retry re-queues the job with optional guidance notes.' },
+    ];
+
+    const EDGE_META_BY_PAIR = new Map();
+    EDGE_DEFS.forEach(def => {
+      const pair = `${def.source}|${def.target}`;
+      if (!EDGE_META_BY_PAIR.has(pair)) EDGE_META_BY_PAIR.set(pair, []);
+      EDGE_META_BY_PAIR.get(pair).push(def);
+    });
+
+    edges.forEach(edge => {
+      const source = edge.source;
+      const target = edge.target;
+      const pairKey = `${source}|${target}`;
+      const candidates = EDGE_META_BY_PAIR.get(pairKey) || [];
+      const labelLower = (edge.labelText || '').toLowerCase();
+      const meta = candidates.find(def =>
+        (def.match && labelLower.includes(def.match)) ||
+        (!def.match && def.actor === edge.actorHint)
+      ) || candidates[0] || null;
+      const actor = meta?.actor || edge.actorHint || 'daemon';
+
+      edgeConnections.push({
+        source,
+        target,
+        actor,
+        desc: meta?.desc || '',
+        edgeId: edge.edgeId,
+        labelText: edge.labelText || '',
+        labelEl: edge.label || null,
+        pathEl: edge.path || null,
+      });
+    });
+
+    // Apply actor styling after connectivity/actor is resolved.
+    edgeConnections.forEach(edge => {
+      const color = ACTOR_COLORS[edge.actor] || '#8b949e';
+      if (edge.labelEl) {
+        edge.labelEl.setAttribute('data-actor', edge.actor);
+        edge.labelEl.classList.add('edge-label-tagged');
+        edge.labelEl.querySelectorAll('span, tspan, p, div').forEach(s => { s.style.color = color; });
+      }
+      if (edge.pathEl) {
+        edge.pathEl.setAttribute('data-actor', edge.actor);
+        edge.pathEl.style.stroke = color;
+        if (isReentryEdge(edge)) edge.pathEl.classList.add('edge-reentry');
+        const markerId = edge.pathEl.getAttribute('marker-end');
+        if (markerId) {
+          const id = markerId.replace(/url\(#?/, '').replace(/\)/, '').replace(/"/g, '');
+          const marker = svg.querySelector('#' + CSS.escape(id));
+          if (marker) {
+            marker.querySelectorAll('path, polygon').forEach(p => {
+              p.style.fill = color;
+              p.style.stroke = color;
+            });
+          }
+        }
+      }
+    });
+
+    // ── Collect node elements ──
+    const nodeElements = {};
+    const nodeLabels = {};
+    const normalizeStateKey = (label = '') => (
+      label
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^[^a-z0-9]+/, '')
+        .replace(/\s+/g, '_')
+    );
+
+    svg.querySelectorAll('.node').forEach(node => {
+      const textEl = node.querySelector('.nodeLabel, text');
+      if (!textEl) return;
+      const label = textEl.textContent.trim();
+      const key = normalizeStateKey(label);
+      if (NODE_DESC[key]) {
+        nodeElements[key] = node;
+        nodeLabels[key] = label;
+        node.setAttribute('data-state', key);
+        if (key === 'ap_cancel' || key === 'ap_retry') {
+          node.classList.add('human-command-node');
+          node.querySelectorAll('rect, polygon, path').forEach(shape => {
+            shape.style.stroke = ACTOR_COLORS.user;
+            shape.style.fill = 'rgba(63,185,80,0.12)';
+          });
+          node.querySelectorAll('p, span, tspan, text').forEach(txt => {
+            txt.style.color = ACTOR_COLORS.user;
+          });
+        }
+      }
+    });
+
+    // ── Legend interactions ──
+    const legendItems = document.querySelectorAll('.legend-item');
+    let edgeClickHandled = false;
+
+    const clearHighlights = () => {
+      container.classList.remove('filtering', 'node-filter');
+      svg.querySelectorAll('.hl').forEach(el => el.classList.remove('hl'));
+    };
+    const clearLegendLocks = () => legendItems.forEach(li => li.classList.remove('locked', 'active'));
+    const highlightEdgeSet = (edges, mode = 'node-filter') => {
+      if (!edges.length) return;
+      if (mode) container.classList.add(mode);
+      const connectedNodes = new Set();
+      edges.forEach(edge => {
+        if (edge.labelEl) edge.labelEl.classList.add('hl');
+        if (edge.pathEl) edge.pathEl.classList.add('hl');
+        connectedNodes.add(edge.source);
+        connectedNodes.add(edge.target);
+      });
+      for (const [name, el] of Object.entries(nodeElements)) {
+        if (connectedNodes.has(name)) el.classList.add('hl');
+      }
+      svg.querySelectorAll('.cluster').forEach(cl => {
+        if (cl.querySelector('.node.hl')) cl.classList.add('hl');
+      });
+    };
+
+    legendItems.forEach(item => {
+      const actor = item.dataset.actor;
+
+      item.addEventListener('mouseenter', () => {
+        clearHighlights();
+        container.classList.add('filtering');
+        highlightEdgeSet(edgeConnections.filter(e => e.actor === actor), null);
+        item.classList.add('active');
+      });
+
+      item.addEventListener('mouseleave', () => {
+        // If any legend item is locked, don't clear on mouseleave
+        if (document.querySelector('.legend-item.locked')) return;
+        clearHighlights();
+        item.classList.remove('active');
+      });
+
+      // Click to lock
+      item.addEventListener('click', () => {
+        const isActive = item.classList.contains('locked');
+        clearLegendLocks();
+        clearHighlights();
+        if (isActive) return; // toggle off
+
+        item.classList.add('locked', 'active');
+        highlightEdgeSet(edgeConnections.filter(e => e.actor === actor), 'filtering');
+      });
+    });
+
+    // ── Node click: highlight connected edges ──
+    for (const [name, el] of Object.entries(nodeElements)) {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+
+        // Clear legend locks
+        clearLegendLocks();
+
+        const wasActive = container.classList.contains('node-filter') &&
+                          el.classList.contains('hl') &&
+                          svg.querySelectorAll('.node.hl').length === 1;
+
+        clearHighlights();
+
+        if (wasActive) return; // toggle off
+
+        container.classList.add('node-filter');
+        el.classList.add('hl');
+
+        // Find all edges connected to this node
+        const connectedNodes = new Set([name]);
+        edgeConnections.forEach(edge => {
+          if (edge.source === name || edge.target === name) {
+            if (edge.labelEl) edge.labelEl.classList.add('hl');
+            if (edge.pathEl) edge.pathEl.classList.add('hl');
+            connectedNodes.add(edge.source);
+            connectedNodes.add(edge.target);
+          }
+        });
+
+        // Highlight connected nodes
+        for (const [n, nodeEl] of Object.entries(nodeElements)) {
+          if (connectedNodes.has(n)) nodeEl.classList.add('hl');
+        }
+
+        // Highlight parent clusters
+        svg.querySelectorAll('.cluster').forEach(cl => {
+          if (cl.querySelector('.node.hl')) cl.classList.add('hl');
+        });
+      });
+    }
+
+    // ── Click edge label to isolate that transition ──
+    function handleEdgeClick(edge) {
+      edgeClickHandled = true;
+
+      clearLegendLocks();
+      const wasActive = container.classList.contains('node-filter') &&
+                        svg.querySelectorAll('.edge-path.hl').length === 1 &&
+                        ((edge.pathEl && edge.pathEl.classList.contains('hl')) ||
+                         (edge.labelEl && edge.labelEl.classList.contains('hl')));
+      clearHighlights();
+
+      if (wasActive) return;
+
+      highlightEdgeSet([edge], 'node-filter');
+    }
+
+    edgeConnections.forEach(edge => {
+      // Attach to the label group and ALL its descendants (spans, divs inside foreignObject)
+      if (edge.labelEl) {
+        const clickTargets = [edge.labelEl, ...edge.labelEl.querySelectorAll('*')];
+        clickTargets.forEach(el => {
+          el.style.cursor = 'pointer';
+          el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleEdgeClick(edge);
+          });
+        });
+      }
+
+      // Also attach to the edge path
+      if (edge.pathEl) {
+        edge.pathEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          handleEdgeClick(edge);
+        });
+      }
+    });
+
+    // ── Click background to reset ──
+    container.addEventListener('click', (e) => {
+      if (edgeClickHandled) { edgeClickHandled = false; return; }
+      if (e.target.closest('.node')) return;
+      clearHighlights();
+      clearLegendLocks();
+    });
+
+    // ── Tooltip on node hover ──
+    const tooltip  = document.getElementById('tooltip');
+    const ttState  = tooltip.querySelector('.tt-state');
+    const ttDesc   = tooltip.querySelector('.tt-desc');
+
+    for (const [name, el] of Object.entries(nodeElements)) {
+      el.addEventListener('mouseenter', (e) => {
+        ttState.textContent = nodeLabels[name] || name.replace(/_/g, ' ');
+        ttDesc.textContent  = NODE_DESC[name] || '';
+        tooltip.classList.add('visible');
+      });
+
+      el.addEventListener('mousemove', (e) => {
+        tooltip.style.left = (e.clientX + 14) + 'px';
+        tooltip.style.top  = (e.clientY + 14) + 'px';
+      });
+
+      el.addEventListener('mouseleave', () => {
+        tooltip.classList.remove('visible');
+      });
+    }
+
+    // ── Tooltip on edge hover ──
+    const ACTOR_LABELS = {
+      daemon: 'Daemon (automatic)',
+      user:   'User (CLI)',
+      llm:    'LLM (AI decision)',
+      config: 'Config (auto_pr)',
+    };
+
+    edgeConnections.forEach(edge => {
+      const targets = [edge.labelEl, edge.pathEl].filter(Boolean);
+
+      targets.forEach(el => {
+        el.addEventListener('mouseenter', () => {
+          const heading = `${edge.source} → ${edge.target}`;
+          const actorLabel = ACTOR_LABELS[edge.actor] || edge.actor;
+          ttState.innerHTML = `${heading} <span style="color:${ACTOR_COLORS[edge.actor]};font-weight:400;font-size:0.72rem">${actorLabel}</span>`;
+          ttDesc.textContent = edge.desc || '';
+          tooltip.classList.add('visible');
+        });
+
+        el.addEventListener('mousemove', (e) => {
+          tooltip.style.left = (e.clientX + 14) + 'px';
+          tooltip.style.top  = (e.clientY + 14) + 'px';
+        });
+
+        el.addEventListener('mouseleave', () => {
+          tooltip.classList.remove('visible');
+        });
+      });
+    });
+  </script>
+</body>
+</html>
