@@ -736,7 +736,7 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 		m.page, _ = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
 		m.cursor = pageStart(m.page, pageSize)
 		return m, nil
-	case "pgup", "pageup":
+	case "p", "pgup", "pageup":
 		targetPage--
 		m.page, _ = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
 		m.cursor = pageStart(m.page, pageSize)
@@ -1425,7 +1425,11 @@ func (m Model) listView() string {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(strings.Join(filterHints, "  ")))
 	} else {
 		// Normal mode: primary nav line + secondary actions line.
-		line1 := []string{fmt.Sprintf("Page %d/%d (%d jobs)", pageNum, pageLabel, len(m.jobs)), "j/k navigate", "enter details"}
+		line1 := []string{fmt.Sprintf("Page %d/%d (%d jobs)", pageNum, pageLabel, len(m.jobs)), "j/k navigate"}
+		if pageLabel > 1 {
+			line1 = append(line1, "n/pgdown next page", "p/pgup prev page")
+		}
+		line1 = append(line1, "enter details")
 		if m.cursor < len(m.jobs) && db.IsCancellableState(m.jobs[m.cursor].State) {
 			line1 = append(line1, "c cancel")
 		}
