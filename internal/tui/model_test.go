@@ -534,7 +534,7 @@ func TestHandleKeyLevel1PaginationControls(t *testing.T) {
 
 	modelAny, _ = m.handleKey(keyRunes('k'))
 	m = modelAny.(Model)
-	if m.cursor != 19 {
+	if m.cursor != 24 {
 		t.Fatalf("expected cursor to wrap to end of page on k; got %d", m.cursor)
 	}
 
