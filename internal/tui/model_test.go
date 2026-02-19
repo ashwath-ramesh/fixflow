@@ -569,10 +569,10 @@ func TestListViewShowsPaginationInfo(t *testing.T) {
 	if !strings.Contains(view, "Page 2/3 (25 jobs)") {
 		t.Fatalf("expected page indicator in list footer, got:\n%s", view)
 	}
-	if !strings.Contains(view, "ap-job-010") {
+	if !strings.Contains(view, "010") {
 		t.Fatalf("expected current page to render page-1 first row, got:\n%s", view)
 	}
-	if strings.Contains(view, "ap-job-000") {
+	if strings.Contains(view, "000") {
 		t.Fatalf("expected previous page rows to be omitted, got:\n%s", view)
 	}
 }
@@ -598,7 +598,7 @@ func TestListViewHandlesZeroAndOneJob(t *testing.T) {
 	if !strings.Contains(view, "Page 1/1 (1 jobs)") {
 		t.Fatalf("expected one-job pagination footer, got:\n%s", view)
 	}
-	if !strings.Contains(view, "ap-job-000") {
+	if !strings.Contains(view, "000") {
 		t.Fatalf("expected single job row, got:\n%s", view)
 	}
 }

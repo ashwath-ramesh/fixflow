@@ -617,26 +617,33 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "n", "pgdown", "pagedown":
 		targetPage++
-		m.page, m.cursor = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
+		m.page, _ = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
+		m.cursor = pageStart(m.page, pageSize)
 		return m, nil
 	case "p", "pgup", "pageup":
 		targetPage--
-		m.page, m.cursor = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
+		m.page, _ = clampPageAndCursor(totalJobs, targetPage, pageStart(targetPage, pageSize), pageSize)
+		m.cursor = pageStart(m.page, pageSize)
 		return m, nil
 	case "g":
-		m.page, m.cursor = clampPageAndCursor(totalJobs, 0, 0, pageSize)
+		m.page, _ = clampPageAndCursor(totalJobs, 0, 0, pageSize)
+		m.cursor = pageStart(m.page, pageSize)
 		return m, nil
 	case "G":
 		last := totalPages - 1
 		if last < 0 {
 			last = 0
 		}
-		m.page, m.cursor = clampPageAndCursor(totalJobs, last, pageStart(last, pageSize), pageSize)
+		m.page, _ = clampPageAndCursor(totalJobs, last, pageStart(last, pageSize), pageSize)
+		m.cursor = pageStart(m.page, pageSize)
 		return m, nil
 	case "up", "k":
 		m.page, m.cursor = clampPageAndCursor(totalJobs, m.page, m.cursor, pageSize)
 		start := pageStart(m.page, pageSize)
 		end := min(start+pageSize, totalJobs)
+		if start >= end {
+			return m, nil
+		}
 		if totalJobs > 0 {
 			if m.cursor == start {
 				m.cursor = end - 1
@@ -648,6 +655,9 @@ func (m Model) handleKeyLevel1(key string) (tea.Model, tea.Cmd) {
 		m.page, m.cursor = clampPageAndCursor(totalJobs, m.page, m.cursor, pageSize)
 		start := pageStart(m.page, pageSize)
 		end := min(start+pageSize, totalJobs)
+		if start >= end {
+			return m, nil
+		}
 		if m.cursor < end-1 {
 			m.cursor++
 		} else {
@@ -959,6 +969,11 @@ func (m Model) View() string {
 func (m Model) listView() string {
 	var b strings.Builder
 	w := m.cw()
+	pageSize := m.pageSize
+	if pageSize < 1 {
+		pageSize = 1
+	}
+	page, _ := clampPageAndCursor(len(m.jobs), m.page, m.cursor, pageSize)
 
 	// ── Title bar ──
 	b.WriteString(titleStyle.Render("AUTOPR"))
@@ -1017,16 +1032,8 @@ func (m Model) listView() string {
 		b.WriteString(dimStyle.Render("No jobs found. Waiting for issues..."))
 		b.WriteString("\n")
 	} else {
-		pageSize := m.pageSize
-		if pageSize < 1 {
-			pageSize = 1
-		}
-		start := pageStart(m.page, pageSize)
+		start := pageStart(page, pageSize)
 		end := min(start+pageSize, len(m.jobs))
-		if start >= len(m.jobs) {
-			start = 0
-			end = 0
-		}
 		header := "  " +
 			headerStyle.Render(padRight("JOB", colJob)) +
 			headerStyle.Render(padRight("STATE", colState)) +
@@ -1088,7 +1095,7 @@ func (m Model) listView() string {
 	}
 	pageCount := m.totalPages(len(m.jobs))
 	pageLabel := pageCount
-	pageNum := m.page + 1
+	pageNum := page + 1
 	if pageCount == 0 {
 		pageLabel = 0
 		pageNum = 0
