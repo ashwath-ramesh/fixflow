@@ -52,8 +52,6 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("signal process %d: %w", pid, err)
 	}
 
-	fmt.Printf("Stopping daemon (pid %d)...\n", pid)
-
 	// Wait for process to exit.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -68,7 +66,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	// Force kill.
 	_ = proc.Signal(syscall.SIGKILL)
 	daemon.RemovePID(cfg.Daemon.PIDFile)
-	fmt.Println("Daemon killed (did not stop gracefully).")
+	fmt.Println("Daemon stopped (forced).")
 	printStopServiceKeepAliveNote(cfg)
 	return nil
 }

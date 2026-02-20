@@ -151,7 +151,7 @@ func runBackground(cfg *config.Config) error {
 		// Still running after 500ms — detach and let it go.
 	}
 
-	fmt.Printf("Daemon started (pid %d), log: %s\n", child.Process.Pid, logPath)
+	fmt.Printf("Daemon started. Log: %s\n", logPath)
 	return nil
 }
 

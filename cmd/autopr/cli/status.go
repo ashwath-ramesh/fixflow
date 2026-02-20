@@ -30,6 +30,28 @@ type statusOutput struct {
 	JobCounts statusJobCounts `json:"job_counts"`
 }
 
+const (
+	statusSectionSeparator  = " · "
+	statusSectionLabelWidth = 10
+)
+
+type statusSectionEntry struct {
+	label string
+	count int
+}
+
+func renderStatusSection(title string, values []statusSectionEntry) (string, bool) {
+	parts := make([]string, 0, len(values))
+	hasNonZero := false
+	for _, value := range values {
+		if value.count != 0 {
+			hasNonZero = true
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", value.count, value.label))
+	}
+	return fmt.Sprintf("%-*s %s", statusSectionLabelWidth, title+":", strings.Join(parts, statusSectionSeparator)), hasNonZero
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show daemon status and queue depth",
@@ -136,10 +158,58 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Daemon: stopped")
 	}
 	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"] + counts["rebasing"] + counts["resolving_conflicts"]
+	sections := []struct {
+		title  string
+		values []statusSectionEntry
+	}{
+		{
+			title: "Pipeline",
+			values: []statusSectionEntry{
+				{label: "queued", count: counts["queued"]},
+				{label: "active", count: active},
+			},
+		},
+		{
+			title: "Active",
+			values: []statusSectionEntry{
+				{label: "planning", count: counts["planning"]},
+				{label: "implementing", count: counts["implementing"]},
+				{label: "reviewing", count: counts["reviewing"]},
+				{label: "testing", count: counts["testing"]},
+			},
+		},
+		{
+			title: "Output",
+			values: []statusSectionEntry{
+				{label: "needs_pr", count: counts["ready"]},
+				{label: "merged", count: merged},
+				{label: "pr_created", count: prCreated},
+			},
+		},
+		{
+			title: "Problems",
+			values: []statusSectionEntry{
+				{label: "failed", count: counts["failed"]},
+				{label: "rejected", count: counts["rejected"]},
+				{label: "cancelled", count: counts["cancelled"]},
+			},
+		},
+	}
 
-	fmt.Printf("Jobs: queued=%d active=%d planning=%d implementing=%d reviewing=%d testing=%d rebasing=%d resolving=%d needs_pr=%d failed=%d cancelled=%d pr_created=%d merged=%d rejected=%d\n",
-		counts["queued"], active, counts["planning"], counts["implementing"], counts["reviewing"],
-		counts["testing"], counts["rebasing"], counts["resolving_conflicts"],
-		counts["ready"], counts["failed"], counts["cancelled"], prCreated, merged, counts["rejected"])
+	sectionLines := make([]string, 0, len(sections))
+	for _, section := range sections {
+		line, hasNonZero := renderStatusSection(section.title, section.values)
+		if hasNonZero {
+			sectionLines = append(sectionLines, line)
+		}
+	}
+
+	if len(sectionLines) > 0 {
+		fmt.Println()
+		for _, line := range sectionLines {
+			fmt.Println(line)
+		}
+	}
+
 	return nil
 }

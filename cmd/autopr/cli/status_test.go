@@ -98,14 +98,102 @@ func TestRunStatusTableOutputUnchanged(t *testing.T) {
 
 	out := runStatusWithTestConfig(t, cfgPath, false)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected daemon + jobs lines, got %d lines: %q", len(lines), out)
+	expected := []string{
+		"Daemon: stopped",
+		"",
+		"Pipeline:  1 queued · 1 active",
+		"Active:    1 planning · 0 implementing · 0 reviewing · 0 testing",
+		"Output:    1 needs_pr · 0 merged · 1 pr_created",
+	}
+	if len(lines) != len(expected) {
+		t.Fatalf("unexpected output lines (%d): %q", len(lines), out)
+	}
+	for i, line := range expected {
+		if lines[i] != line {
+			t.Fatalf("line %d mismatch: expected %q, got %q", i, line, lines[i])
+		}
+	}
+}
+
+func TestRunStatusTableOutputNoJobSectionsForZeroCounts(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+
+	out := runStatusWithTestConfig(t, cfgPath, false)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected daemon-only output, got %d lines: %q", len(lines), out)
 	}
 	if lines[0] != "Daemon: stopped" {
 		t.Fatalf("unexpected daemon line: %q", lines[0])
 	}
-	if lines[1] != "Jobs: queued=1 active=1 planning=1 implementing=0 reviewing=0 testing=0 rebasing=0 resolving=0 needs_pr=1 failed=0 cancelled=0 pr_created=1 merged=0 rejected=0" {
-		t.Fatalf("unexpected jobs line: %q", lines[1])
+}
+
+func TestRunStatusTableOutputSkipsZeroSections(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+
+	seedStatusJobs(t, dbPath, []statusSeed{
+		{state: "planning", count: 2},
+		{state: "testing", count: 1},
+		{state: "failed", count: 3},
+	})
+
+	out := runStatusWithTestConfig(t, cfgPath, false)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{
+		"Daemon: stopped",
+		"",
+		"Pipeline:  0 queued · 3 active",
+		"Active:    2 planning · 0 implementing · 0 reviewing · 1 testing",
+		"Problems:  3 failed · 0 rejected · 0 cancelled",
+	}
+	if len(lines) != len(expected) {
+		t.Fatalf("unexpected output lines (%d): %q", len(lines), out)
+	}
+	for i, line := range expected {
+		if lines[i] != line {
+			t.Fatalf("line %d mismatch: expected %q, got %q", i, line, lines[i])
+		}
+	}
+}
+
+func TestRunStatusTableOutputIncludesAllSections(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+
+	seedStatusJobs(t, dbPath, []statusSeed{
+		{state: "queued", count: 2},
+		{state: "planning", count: 1},
+		{state: "implementing", count: 1},
+		{state: "reviewing", count: 2},
+		{state: "testing", count: 3},
+		{state: "ready", count: 4},
+		{state: "failed", count: 1},
+		{state: "rejected", count: 2},
+		{state: "cancelled", count: 3},
+		{state: "approved", count: 5, merged: 2},
+	})
+
+	out := runStatusWithTestConfig(t, cfgPath, false)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{
+		"Daemon: stopped",
+		"",
+		"Pipeline:  2 queued · 7 active",
+		"Active:    1 planning · 1 implementing · 2 reviewing · 3 testing",
+		"Output:    4 needs_pr · 2 merged · 3 pr_created",
+		"Problems:  1 failed · 2 rejected · 3 cancelled",
+	}
+	if len(lines) != len(expected) {
+		t.Fatalf("unexpected output lines (%d): %q", len(lines), out)
+	}
+	for i, line := range expected {
+		if lines[i] != line {
+			t.Fatalf("line %d mismatch: expected %q, got %q", i, line, lines[i])
+		}
 	}
 }
 
