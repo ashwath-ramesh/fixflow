@@ -20,13 +20,14 @@ var (
 	jsonOut bool
 	version = config.Version
 	commit  = "unknown"
+	date    = "unknown"
 )
 
 var rootCmd = &cobra.Command{
 	Use:     "ap",
 	Short:   "AutoPR — autonomous issue-to-PR daemon",
 	Long:    "AutoPR watches your GitLab/GitHub/Sentry issues, then uses an LLM to plan, implement, test, and push fixes — ready for human approval.",
-	Version: fmt.Sprintf("%s (%s)", version, commit),
+	Version: fmt.Sprintf("%s (%s, %s)", version, commit, date),
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		level := slog.LevelInfo
 		if verbose {
