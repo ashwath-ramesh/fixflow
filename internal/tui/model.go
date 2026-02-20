@@ -131,6 +131,7 @@ type Model struct {
 
 	// Level 2: confirmation prompt and action feedback
 	confirmAction string // "approve", "reject", "retry", "cancel", or "" (none)
+	confirmDraft  bool   // true when approve should create a draft PR
 	confirmJobID  string // explicit target for confirmation actions (used by list-view cancel)
 	actionErr     error  // non-fatal error from last action (shown inline)
 	actionWarn    string // non-fatal warning from last successful action
@@ -402,7 +403,7 @@ func (m Model) executeApprove() tea.Msg {
 
 		prTitle, prBody := buildTUIPRContent(job, issue)
 		var prErr error
-		prURL, prErr = createTUIPR(ctx, m.cfg, proj, *job, prTitle, prBody)
+		prURL, prErr = createTUIPR(ctx, m.cfg, proj, *job, prTitle, prBody, m.confirmDraft)
 		if prErr != nil {
 			return actionResultMsg{action: "approve", err: fmt.Errorf("create PR: %w", prErr)}
 		}
@@ -490,7 +491,7 @@ func buildTUIPRContent(job *db.Job, issue db.Issue) (string, string) {
 }
 
 // createTUIPR creates a GitHub PR or GitLab MR based on project config.
-func createTUIPR(ctx context.Context, cfg *config.Config, proj *config.ProjectConfig, job db.Job, title, body string) (string, error) {
+func createTUIPR(ctx context.Context, cfg *config.Config, proj *config.ProjectConfig, job db.Job, title, body string, draft bool) (string, error) {
 	if job.BranchName == "" {
 		return "", fmt.Errorf("job has no branch name — was the branch pushed?")
 	}
@@ -500,7 +501,7 @@ func createTUIPR(ctx context.Context, cfg *config.Config, proj *config.ProjectCo
 			return "", fmt.Errorf("GITHUB_TOKEN required to create PR")
 		}
 		return git.CreateGitHubPR(ctx, cfg.Tokens.GitHub, proj.GitHub.Owner, proj.GitHub.Repo,
-			job.BranchName, proj.BaseBranch, title, body, false)
+			job.BranchName, proj.BaseBranch, title, body, draft)
 	case proj.GitLab != nil:
 		if cfg.Tokens.GitLab == "" {
 			return "", fmt.Errorf("GITLAB_TOKEN required to create MR")
@@ -556,6 +557,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessCursor = 0
 				m.confirmAction = ""
 				m.confirmJobID = ""
+				m.confirmDraft = false
 				m.actionErr = nil
 				m.actionWarn = ""
 			}
@@ -602,6 +604,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		m.confirmAction = ""
 		m.confirmJobID = ""
+		m.confirmDraft = false
 		if msg.err != nil {
 			// Non-fatal: show error inline on the detail view.
 			m.actionErr = msg.err
@@ -688,6 +691,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "esc":
 			m.confirmAction = ""
 			m.confirmJobID = ""
+			m.confirmDraft = false
 		}
 		return m, nil
 	}
@@ -1007,6 +1011,12 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		}
 	case "a":
 		if m.selected != nil && m.selected.State == "ready" {
+			m.confirmDraft = false
+			startConfirm(&m, "approve", m.selected.ID)
+		}
+	case "A":
+		if m.selected != nil && m.selected.State == "ready" {
+			m.confirmDraft = true
 			startConfirm(&m, "approve", m.selected.ID)
 		}
 	case "x":
@@ -1022,6 +1032,7 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 			startConfirm(&m, "cancel", m.selected.ID)
 		}
 	case "esc":
+		m.confirmDraft = false
 		m.selected = nil
 		m.sessions = nil
 		m.testArtifact = nil
@@ -1783,7 +1794,7 @@ func (m Model) detailView() string {
 		hintParts = append(hintParts, "b open PR")
 	}
 	if job.State == "ready" {
-		hintParts = append(hintParts, "a approve", "x reject")
+		hintParts = append(hintParts, "a approve", "A draft", "x reject")
 	}
 	if job.State == "failed" || job.State == "rejected" || job.State == "cancelled" {
 		hintParts = append(hintParts, "R retry")
@@ -2042,6 +2053,9 @@ func (m Model) confirmPrompt() string {
 	short := db.ShortID(jobID)
 	switch m.confirmAction {
 	case "approve":
+		if m.confirmDraft {
+			return "Approve job " + short + " and create draft PR?"
+		}
 		return "Approve job " + short + " and create PR?"
 	case "reject":
 		return "Reject job " + short + "?"
