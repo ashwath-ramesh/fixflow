@@ -45,7 +45,7 @@ func TestRunStatusJSONOutputsNormalizedJobCounts(t *testing.T) {
 		{state: "approved", count: 3, merged: 1},
 	})
 
-	out := runStatusWithTestConfig(t, cfgPath, true)
+	out := runStatusWithTestConfig(t, cfgPath, true, false)
 
 	var decoded statusJSONOutput
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &decoded); err != nil {
@@ -96,7 +96,7 @@ func TestRunStatusTableOutputUnchanged(t *testing.T) {
 		{state: "approved", count: 1, merged: 0},
 	})
 
-	out := runStatusWithTestConfig(t, cfgPath, false)
+	out := runStatusWithTestConfig(t, cfgPath, false, false)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	expected := []string{
 		"Daemon: stopped",
@@ -115,11 +115,67 @@ func TestRunStatusTableOutputUnchanged(t *testing.T) {
 	}
 }
 
+func TestRunStatusShortOutputStopped(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+
+	out := runStatusWithTestConfig(t, cfgPath, false, true)
+	if got := strings.TrimSpace(out); got != "stopped | 0 queued, 0 active" {
+		t.Fatalf("unexpected short output: %q", got)
+	}
+}
+
+func TestRunStatusShortOutputRunning(t *testing.T) {
+	tmp := t.TempDir()
+	pidPath := filepath.Join(tmp, "autopr.pid")
+	cfgPath := writeStatusConfigWithPID(t, tmp, pidPath)
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	out := runStatusWithTestConfig(t, cfgPath, false, true)
+	if got := strings.TrimSpace(out); got != "running | 0 queued, 0 active" {
+		t.Fatalf("unexpected short output: %q", got)
+	}
+}
+
+func TestRunStatusShortOutputActiveCountIncludesRebasingAndResolvingConflicts(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+
+	seedStatusJobs(t, dbPath, []statusSeed{
+		{state: "queued", count: 2},
+		{state: "planning", count: 1},
+		{state: "implementing", count: 2},
+		{state: "reviewing", count: 3},
+		{state: "testing", count: 4},
+		{state: "rebasing", count: 1},
+		{state: "resolving_conflicts", count: 5},
+	})
+
+	out := runStatusWithTestConfig(t, cfgPath, false, true)
+	if got := strings.TrimSpace(out); got != "stopped | 2 queued, 16 active" {
+		t.Fatalf("unexpected short output: %q", got)
+	}
+}
+
+func TestRunStatusJSONHasPriorityOverShort(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := writeStatusConfig(t, tmp)
+
+	out := runStatusWithTestConfig(t, cfgPath, true, true)
+	out = strings.TrimSpace(out)
+	if !strings.HasPrefix(out, "{") {
+		t.Fatalf("expected JSON output, got %q", out)
+	}
+}
+
 func TestRunStatusTableOutputNoJobSectionsForZeroCounts(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := writeStatusConfig(t, tmp)
 
-	out := runStatusWithTestConfig(t, cfgPath, false)
+	out := runStatusWithTestConfig(t, cfgPath, false, false)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 1 {
 		t.Fatalf("expected daemon-only output, got %d lines: %q", len(lines), out)
@@ -140,7 +196,7 @@ func TestRunStatusTableOutputSkipsZeroSections(t *testing.T) {
 		{state: "failed", count: 3},
 	})
 
-	out := runStatusWithTestConfig(t, cfgPath, false)
+	out := runStatusWithTestConfig(t, cfgPath, false, false)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	expected := []string{
 		"Daemon: stopped",
@@ -177,7 +233,7 @@ func TestRunStatusTableOutputIncludesAllSections(t *testing.T) {
 		{state: "approved", count: 5, merged: 2},
 	})
 
-	out := runStatusWithTestConfig(t, cfgPath, false)
+	out := runStatusWithTestConfig(t, cfgPath, false, false)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	expected := []string{
 		"Daemon: stopped",
@@ -201,7 +257,7 @@ func TestRunStatusJSONNoPidFile(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := writeStatusConfig(t, tmp)
 
-	out := runStatusWithTestConfig(t, cfgPath, true)
+	out := runStatusWithTestConfig(t, cfgPath, true, false)
 
 	var decoded statusJSONOutput
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &decoded); err != nil {
@@ -223,7 +279,7 @@ func TestRunStatusJSONBadPidFile(t *testing.T) {
 		t.Fatalf("write bad pid file: %v", err)
 	}
 
-	out := runStatusWithTestConfig(t, cfgPath, true)
+	out := runStatusWithTestConfig(t, cfgPath, true, false)
 
 	var decoded statusJSONOutput
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &decoded); err != nil {
@@ -240,7 +296,7 @@ func TestRunStatusJSONBadPidFile(t *testing.T) {
 func TestRunStatusJSONEmptyDBIncludesZeroCounts(t *testing.T) {
 	tmp := t.TempDir()
 	cfgPath := writeStatusConfig(t, tmp)
-	out := runStatusWithTestConfig(t, cfgPath, true)
+	out := runStatusWithTestConfig(t, cfgPath, true, false)
 
 	var decoded statusJSONOutput
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &decoded); err != nil {
@@ -341,15 +397,18 @@ func seedStatusJobs(t *testing.T, dbPath string, seeds []statusSeed) {
 	}
 }
 
-func runStatusWithTestConfig(t *testing.T, configPath string, asJSON bool) string {
+func runStatusWithTestConfig(t *testing.T, configPath string, asJSON bool, asShort bool) string {
 	t.Helper()
 	prevCfgPath := cfgPath
 	prevJSON := jsonOut
+	prevShort := statusShort
 	cfgPath = configPath
 	jsonOut = asJSON
+	statusShort = asShort
 	t.Cleanup(func() {
 		cfgPath = prevCfgPath
 		jsonOut = prevJSON
+		statusShort = prevShort
 	})
 
 	cmd := &cobra.Command{}
