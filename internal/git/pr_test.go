@@ -304,10 +304,11 @@ func TestNormalizeGitLabBaseURL(t *testing.T) {
 func TestMergeGitLabMR_Succeeds(t *testing.T) {
 	t.Parallel()
 
-	var gotPath, gotMethod string
+	var gotEscapedPath, gotRequestURI, gotMethod string
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		gotEscapedPath = r.URL.EscapedPath()
+		gotRequestURI = r.RequestURI
 		gotMethod = r.Method
 		var err error
 		gotBody, err = io.ReadAll(r.Body)
@@ -330,8 +331,15 @@ func TestMergeGitLabMR_Succeeds(t *testing.T) {
 		t.Fatalf("want method %s, got %s", http.MethodPut, gotMethod)
 	}
 	wantPath := "/api/v4/projects/acmecorp%2Fplaceholder/merge_requests/99/merge"
-	if gotPath != wantPath {
-		t.Fatalf("want path %q, got %q", wantPath, gotPath)
+	requestPath := gotEscapedPath
+	if requestPath == "" {
+		requestPath = gotRequestURI
+		if i := strings.Index(requestPath, "?"); i != -1 {
+			requestPath = requestPath[:i]
+		}
+	}
+	if requestPath != wantPath {
+		t.Fatalf("want path %q, got escaped=%q request_uri=%q", wantPath, gotEscapedPath, gotRequestURI)
 	}
 	if string(gotBody) == "" {
 		t.Fatalf("expected JSON body")
