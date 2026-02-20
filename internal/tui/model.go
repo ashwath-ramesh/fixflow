@@ -130,11 +130,13 @@ type Model struct {
 	sessCursor     int
 
 	// Level 2: confirmation prompt and action feedback
-	confirmAction string // "approve", "reject", "retry", "cancel", or "" (none)
-	confirmDraft  bool   // true when approve should create a draft PR
-	confirmJobID  string // explicit target for confirmation actions (used by list-view cancel)
-	actionErr     error  // non-fatal error from last action (shown inline)
-	actionWarn    string // non-fatal warning from last successful action
+	confirmAction   string // "approve", "reject", "retry", "cancel", or "" (none)
+	confirmDraft    bool   // true when approve should create a draft PR
+	confirmJobID    string // explicit target for confirmation actions (used by list-view cancel)
+	confirmText     bool   // true when waiting for text input (reject reason / retry notes)
+	confirmTextBuf  string // accumulated text from key events
+	actionErr       error  // non-fatal error from last action (shown inline)
+	actionWarn      string // non-fatal warning from last successful action
 
 	// Level 2d: diff view
 	showDiff   bool
@@ -429,19 +431,31 @@ func (m Model) executeApprove() tea.Msg {
 }
 
 func (m Model) executeReject() tea.Msg {
-	ctx := context.Background()
-	if err := m.store.TransitionState(ctx, m.selected.ID, "ready", "rejected"); err != nil {
-		return actionResultMsg{action: "reject", err: err}
+	return m.executeRejectWith("")
+}
+
+func (m Model) executeRejectWith(reason string) func() tea.Msg {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.store.RejectJob(ctx, m.selected.ID, "ready", reason); err != nil {
+			return actionResultMsg{action: "reject", err: err}
+		}
+		return actionResultMsg{action: "reject"}
 	}
-	return actionResultMsg{action: "reject"}
 }
 
 func (m Model) executeRetry() tea.Msg {
-	ctx := context.Background()
-	if err := m.store.ResetJobForRetry(ctx, m.selected.ID, ""); err != nil {
-		return actionResultMsg{action: "retry", err: err}
+	return m.executeRetryWith("")()
+}
+
+func (m Model) executeRetryWith(notes string) func() tea.Msg {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.store.ResetJobForRetry(ctx, m.selected.ID, notes); err != nil {
+			return actionResultMsg{action: "retry", err: err}
+		}
+		return actionResultMsg{action: "retry"}
 	}
-	return actionResultMsg{action: "retry"}
 }
 
 func (m Model) executeCancel() tea.Msg {
@@ -558,6 +572,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmAction = ""
 				m.confirmJobID = ""
 				m.confirmDraft = false
+				m.confirmText = false
+				m.confirmTextBuf = ""
 				m.actionErr = nil
 				m.actionWarn = ""
 			}
@@ -605,6 +621,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmAction = ""
 		m.confirmJobID = ""
 		m.confirmDraft = false
+		m.confirmText = false
+		m.confirmTextBuf = ""
 		if msg.err != nil {
 			// Non-fatal: show error inline on the detail view.
 			m.actionErr = msg.err
@@ -668,6 +686,46 @@ func renderMarkdown(text string, width int) []string {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Text input mode: capture keys into buffer. Must come before quit handler
+	// so users can type 'q' in their reason/notes text.
+	if m.confirmText {
+		switch key {
+		case "enter":
+			text := m.confirmTextBuf
+			action := m.confirmAction
+			m.confirmText = false
+			m.confirmTextBuf = ""
+			switch action {
+			case "reject":
+				return m, m.executeRejectWith(text)
+			case "retry":
+				return m, m.executeRetryWith(text)
+			}
+			return m, nil
+		case "esc":
+			m.confirmText = false
+			m.confirmTextBuf = ""
+			m.confirmAction = ""
+			m.confirmJobID = ""
+			return m, nil
+		case "backspace":
+			if len(m.confirmTextBuf) > 0 {
+				m.confirmTextBuf = m.confirmTextBuf[:len(m.confirmTextBuf)-1]
+			}
+			return m, nil
+		case "ctrl+c":
+			return m, tea.Quit
+		default:
+			// Only append printable single-rune characters.
+			runes := []rune(key)
+			if len(runes) == 1 && runes[0] >= 32 {
+				m.confirmTextBuf += key
+			}
+			return m, nil
+		}
+	}
+
 	switch key {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -682,9 +740,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "approve":
 				return m, m.executeApprove
 			case "reject":
-				return m, m.executeReject
+				m.confirmText = true
+				m.confirmTextBuf = ""
+				return m, nil
 			case "retry":
-				return m, m.executeRetry
+				m.confirmText = true
+				m.confirmTextBuf = ""
+				return m, nil
 			case "cancel":
 				return m, m.executeCancel
 			}
@@ -1033,6 +1095,8 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		}
 	case "esc":
 		m.confirmDraft = false
+		m.confirmText = false
+		m.confirmTextBuf = ""
 		m.selected = nil
 		m.sessions = nil
 		m.testArtifact = nil
@@ -1423,7 +1487,11 @@ func (m Model) listView() string {
 	b.WriteString(dimStyle.Render(strings.Repeat("─", w)))
 	b.WriteString("\n")
 	if m.confirmAction != "" {
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmPrompt()))
+		if m.confirmText {
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmTextPrompt()))
+		} else {
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmPrompt()))
+		}
 		return b.String()
 	}
 	pageCount := m.totalPages(len(m.jobs))
@@ -1775,9 +1843,13 @@ func (m Model) detailView() string {
 
 	// Confirmation prompt overrides normal hint bar.
 	if m.confirmAction != "" {
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmPrompt()))
-		if m.confirmAction != "cancel" {
-			b.WriteString(dimStyle.Render("  y confirm  n cancel"))
+		if m.confirmText {
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmTextPrompt()))
+		} else {
+			b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(m.confirmPrompt()))
+			if m.confirmAction != "cancel" {
+				b.WriteString(dimStyle.Render("  y confirm  n cancel"))
+			}
 		}
 		return b.String()
 	}
@@ -2066,6 +2138,14 @@ func (m Model) confirmPrompt() string {
 	default:
 		return ""
 	}
+}
+
+func (m Model) confirmTextPrompt() string {
+	label := "Reason"
+	if m.confirmAction == "retry" {
+		label = "Notes"
+	}
+	return fmt.Sprintf("%s (Enter to submit, Esc to cancel): %s█", label, m.confirmTextBuf)
 }
 
 func (m Model) jobCounts() map[string]int {
