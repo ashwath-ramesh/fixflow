@@ -141,6 +141,25 @@ func findLineContainingText(t *testing.T, view, want string) string {
 	return ""
 }
 
+func findLineContainingAll(t *testing.T, view string, wants ...string) string {
+	t.Helper()
+	for _, line := range strings.Split(view, "\n") {
+		plain := stripANSI(line)
+		ok := true
+		for _, want := range wants {
+			if !strings.Contains(plain, want) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return plain
+		}
+	}
+	t.Fatalf("could not find line containing all %v in:\n%s", wants, view)
+	return ""
+}
+
 func TestListViewShowsFilterIndicatorAndFooterHints(t *testing.T) {
 	t.Parallel()
 	jobs := []db.Job{
@@ -2011,6 +2030,164 @@ func TestDetailViewPipelineShowsStartTimesForRows(t *testing.T) {
 	}
 }
 
+func TestDetailViewPipelineShowsCheckingCIRow(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:              "ap-job-ci-1",
+		State:           "awaiting_checks",
+		ProjectName:     "proj",
+		PRURL:           "https://example.com/pr/1",
+		CIStartedAt:     "2025-02-19T14:03:04Z",
+		CIStatusSummary: "CI checks: total=3 completed=1 passed=1 failed=0 pending=2",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{ID: 1, Step: "plan", Status: "completed", LLMProvider: "codex", CreatedAt: "2025-02-19T14:01:02Z"},
+		},
+	}
+
+	line := findLineContainingAll(t, m.detailView(), "checking ci", "github")
+	if !strings.Contains(line, "running") {
+		t.Fatalf("expected checking ci row to be running, got %q", line)
+	}
+}
+
+func TestDetailViewPipelineCheckingCIStatusByState(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		state  string
+		want   string
+		reason string
+	}{
+		{name: "awaiting", state: "awaiting_checks", want: "running"},
+		{name: "approved", state: "approved", want: "completed"},
+		{name: "rejected", state: "rejected", want: "failed", reason: "CI check failed: lint"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			job := db.Job{
+				ID:              "ap-job-ci-status-" + tc.name,
+				State:           tc.state,
+				ProjectName:     "proj",
+				PRURL:           "https://example.com/pr/2",
+				CIStartedAt:     "2025-02-19T14:03:04Z",
+				CICompletedAt:   "2025-02-19T14:05:04Z",
+				RejectReason:    tc.reason,
+				CIStatusSummary: "summary",
+				CompletedAt:     "2025-02-19T14:06:04Z",
+			}
+			m := Model{selected: &job}
+			line := findLineContainingAll(t, m.detailView(), "checking ci", "github")
+			if !strings.Contains(line, tc.want) {
+				t.Fatalf("expected checking ci row status %q, got %q", tc.want, line)
+			}
+		})
+	}
+}
+
+func TestDetailViewPipelineCheckingCIRowOrderBeforePRCreated(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:              "ap-job-ci-order",
+		State:           "approved",
+		ProjectName:     "proj",
+		PRURL:           "https://example.com/pr/3",
+		CIStartedAt:     "2025-02-19T14:03:04Z",
+		CICompletedAt:   "2025-02-19T14:04:04Z",
+		CIStatusSummary: "summary",
+		CompletedAt:     "2025-02-19T14:05:04Z",
+	}
+	view := stripANSI((Model{selected: &job}).detailView())
+	ciLine := findLineContainingAll(t, view, "checking ci", "github")
+	prLine := findLineContainingAll(t, view, "pr created", "completed")
+	ciIdx := strings.Index(view, ciLine)
+	prIdx := strings.Index(view, prLine)
+	if ciIdx == -1 || prIdx == -1 || ciIdx > prIdx {
+		t.Fatalf("expected checking ci before pr created:\n%s", view)
+	}
+}
+
+func TestDetailViewPipelineHidesCheckingCIWithoutCIMetadata(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:          "ap-job-ci-hide",
+		State:       "approved",
+		ProjectName: "proj",
+		PRURL:       "https://example.com/pr/4",
+		CompletedAt: "2025-02-19T14:05:04Z",
+	}
+	view := stripANSI((Model{selected: &job}).detailView())
+	if strings.Contains(view, "checking ci") {
+		t.Fatalf("did not expect checking ci row without ci metadata/state:\n%s", view)
+	}
+}
+
+func TestHandleKeyEnterOnCheckingCIRowOpensCIDetailView(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:              "ap-job-ci-enter",
+		State:           "approved",
+		ProjectName:     "proj",
+		PRURL:           "https://example.com/pr/5",
+		CIStartedAt:     "2025-02-19T14:03:04Z",
+		CICompletedAt:   "2025-02-19T14:04:04Z",
+		CIStatusSummary: "CI checks: total=3 completed=3 passed=3 failed=0 pending=0",
+		CompletedAt:     "2025-02-19T14:05:04Z",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{ID: 1, Step: "plan", Status: "completed", LLMProvider: "codex"},
+		},
+		sessCursor: 1, // first synthetic row = checking ci
+	}
+
+	modelAny, cmd := m.handleKey(keyType(tea.KeyEnter))
+	m = modelAny.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no async command for synthetic checking ci row")
+	}
+	if m.selectedSession == nil || m.selectedSession.Step != "awaiting_checks" {
+		t.Fatalf("expected checking ci detail view, got %+v", m.selectedSession)
+	}
+}
+
+func TestSessionViewNumberingIncludesCheckingCIRow(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:              "ap-job-ci-num",
+		State:           "approved",
+		ProjectName:     "proj",
+		PRURL:           "https://example.com/pr/6",
+		CIStartedAt:     "2025-02-19T14:03:04Z",
+		CICompletedAt:   "2025-02-19T14:04:04Z",
+		CIStatusSummary: "summary",
+		CompletedAt:     "2025-02-19T14:05:04Z",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{ID: 1, Step: "plan", Status: "completed"},
+		},
+	}
+	m = m.enterCheckingCIView()
+	view := stripANSI(m.sessionView())
+	if !strings.Contains(view, "SESSION #2") {
+		t.Fatalf("expected checking ci synthetic step to be numbered after sessions, got:\n%s", view)
+	}
+}
+
 func TestSessionViewShowsStartTimeAboveDuration(t *testing.T) {
 	t.Parallel()
 
@@ -2046,11 +2223,15 @@ func TestSyntheticSessionViewsCarryStartTimes(t *testing.T) {
 	base := Model{
 		cfg: &config.Config{},
 		selected: &db.Job{
-			ID:          "ap-job-1234",
-			ProjectName: "proj",
-			CompletedAt: "2025-02-19T14:03:04Z",
-			PRMergedAt:  "2025-02-19T14:04:05Z",
-			PRClosedAt:  "2025-02-19T14:05:06Z",
+			ID:              "ap-job-1234",
+			ProjectName:     "proj",
+			PRURL:           "https://example.com/pr/1",
+			CIStartedAt:     "2025-02-19T14:02:30Z",
+			CICompletedAt:   "2025-02-19T14:02:59Z",
+			CIStatusSummary: "CI checks: total=3 completed=3 passed=3 failed=0 pending=0",
+			CompletedAt:     "2025-02-19T14:03:04Z",
+			PRMergedAt:      "2025-02-19T14:04:05Z",
+			PRClosedAt:      "2025-02-19T14:05:06Z",
 		},
 		testArtifact: &db.Artifact{
 			CreatedAt: "2025-02-19T14:02:03Z",
@@ -2066,6 +2247,14 @@ func TestSyntheticSessionViewsCarryStartTimes(t *testing.T) {
 	prView := base.enterPRView()
 	if got, want := prView.selectedSession.CreatedAt, "2025-02-19T14:03:04Z"; got != want {
 		t.Fatalf("pr view created_at = %q, want %q", got, want)
+	}
+
+	ciView := base.enterCheckingCIView()
+	if got, want := ciView.selectedSession.CreatedAt, "2025-02-19T14:02:30Z"; got != want {
+		t.Fatalf("checking ci view created_at = %q, want %q", got, want)
+	}
+	if !strings.Contains(ciView.selectedSession.ResponseText, "CI checks: total=3") {
+		t.Fatalf("expected checking ci details in synthetic session response, got:\n%s", ciView.selectedSession.ResponseText)
 	}
 
 	mergedView := base.enterMergedView()

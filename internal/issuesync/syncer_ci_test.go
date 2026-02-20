@@ -2,6 +2,7 @@ package issuesync
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"autopr/internal/config"
@@ -47,6 +48,9 @@ func TestCheckCIStatus_AllChecksPassed(t *testing.T) {
 	if job.State != "approved" {
 		t.Fatalf("expected job state approved, got %q", job.State)
 	}
+	if job.CIStatusSummary == "" || !strings.Contains(job.CIStatusSummary, "passed") {
+		t.Fatalf("expected CI summary to include pass details, got %q", job.CIStatusSummary)
+	}
 }
 
 func TestCheckCIStatus_CheckFailed(t *testing.T) {
@@ -91,6 +95,9 @@ func TestCheckCIStatus_CheckFailed(t *testing.T) {
 	if job.RejectReason == "" {
 		t.Fatalf("expected reject_reason to be set")
 	}
+	if job.CIStatusSummary == "" || !strings.Contains(job.CIStatusSummary, "lint") {
+		t.Fatalf("expected CI summary to include failed check details, got %q", job.CIStatusSummary)
+	}
 }
 
 func TestCheckCIStatus_Pending(t *testing.T) {
@@ -130,6 +137,9 @@ func TestCheckCIStatus_Pending(t *testing.T) {
 	if job.State != "awaiting_checks" {
 		t.Fatalf("expected job to remain awaiting_checks, got %q", job.State)
 	}
+	if job.CIStatusSummary == "" || !strings.Contains(job.CIStatusSummary, "pending=2") {
+		t.Fatalf("expected CI summary to include pending count, got %q", job.CIStatusSummary)
+	}
 }
 
 func TestCheckCIStatus_NoChecksYet(t *testing.T) {
@@ -163,6 +173,9 @@ func TestCheckCIStatus_NoChecksYet(t *testing.T) {
 	}
 	if job.State != "awaiting_checks" {
 		t.Fatalf("expected job to remain awaiting_checks, got %q", job.State)
+	}
+	if job.CIStatusSummary == "" || !strings.Contains(job.CIStatusSummary, "no check-runs") {
+		t.Fatalf("expected CI summary to mention no checks, got %q", job.CIStatusSummary)
 	}
 }
 

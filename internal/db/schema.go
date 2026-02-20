@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     started_at       TEXT,
-    completed_at     TEXT
+    completed_at     TEXT,
+    ci_started_at    TEXT,
+    ci_completed_at  TEXT,
+    ci_status_summary TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
@@ -146,6 +149,9 @@ func (s *Store) createSchema() error {
 	_, _ = s.Writer.Exec("ALTER TABLE jobs RENAME COLUMN mr_url TO pr_url")
 	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN pr_merged_at TEXT")
 	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN pr_closed_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_started_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_completed_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_status_summary TEXT")
 	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1 CHECK(eligible IN (0,1))")
 	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''")
 	_, _ = s.Writer.Exec("ALTER TABLE issues ADD COLUMN evaluated_at TEXT NOT NULL DEFAULT ''")
@@ -183,6 +189,11 @@ func (s *Store) createSchema() error {
 	if err := s.migrateNotificationEventsNeedsPR(); err != nil {
 		return err
 	}
+
+	// Ensure CI metadata columns exist even if an older migration recreated jobs.
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_started_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_completed_at TEXT")
+	_, _ = s.Writer.Exec("ALTER TABLE jobs ADD COLUMN ci_status_summary TEXT")
 
 	return nil
 }

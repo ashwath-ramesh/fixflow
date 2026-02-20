@@ -185,6 +185,7 @@ type jobsMsg struct {
 type issueSummaryMsg db.IssueSyncSummary
 type sessionsMsg struct {
 	jobID          string
+	job            db.Job
 	sessions       []db.LLMSessionSummary
 	testArtifact   *db.Artifact
 	rebaseArtifact *db.Artifact
@@ -263,13 +264,17 @@ func (m Model) fetchIssueSummary() tea.Msg {
 
 func (m Model) fetchSessions() tea.Msg {
 	jobID := m.selected.ID
+	job, err := m.store.GetJob(context.Background(), jobID)
+	if err != nil {
+		return errMsg(err)
+	}
 	sessions, err := m.store.ListSessionSummariesByJob(context.Background(), jobID)
 	if err != nil {
 		return errMsg(err)
 	}
-	activeStep := db.StepForState(m.selected.State)
+	activeStep := db.StepForState(job.State)
 	sessions = filterGhostSessions(sessions, activeStep)
-	msg := sessionsMsg{jobID: jobID, sessions: sessions}
+	msg := sessionsMsg{jobID: jobID, job: job, sessions: sessions}
 	if art, err := m.store.GetLatestArtifact(context.Background(), jobID, "test_output"); err == nil {
 		msg.testArtifact = &art
 	}
@@ -639,19 +644,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selected == nil || m.selected.ID != msg.jobID {
 			break
 		}
+		m.selected = &msg.job
 		m.sessions = msg.sessions
 		m.testArtifact = msg.testArtifact
 		m.rebaseArtifact = msg.rebaseArtifact
 		// Clamp cursor rather than resetting so auto-refresh doesn't jump.
-		maxIdx := len(msg.sessions)
-		if msg.testArtifact != nil {
-			maxIdx++
-		}
-		if msg.rebaseArtifact != nil {
-			maxIdx++
-		}
+		maxIdx := len(m.sessions) + len(m.pipelineSyntheticRows())
 		if maxIdx > 0 && m.sessCursor >= maxIdx {
 			m.sessCursor = maxIdx - 1
+		} else if maxIdx == 0 {
+			m.sessCursor = 0
 		}
 		m.err = nil
 	case sessionMsg:
@@ -1043,22 +1045,207 @@ func (m Model) projectFilterOptions() []string {
 	return options
 }
 
-func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
-	maxCursor := len(m.sessions) - 1
+type pipelineRowKind string
+
+const (
+	pipelineRowTest       pipelineRowKind = "test"
+	pipelineRowRebase     pipelineRowKind = "rebase"
+	pipelineRowCheckingCI pipelineRowKind = "checking_ci"
+	pipelineRowPRCreated  pipelineRowKind = "pr_created"
+	pipelineRowMerged     pipelineRowKind = "merged"
+	pipelineRowPRClosed   pipelineRowKind = "pr_closed"
+)
+
+type pipelineSyntheticRow struct {
+	kind        pipelineRowKind
+	stepLabel   string
+	sessionStep string
+	status      string
+	provider    string
+	tokens      string
+	start       string
+	duration    string
+}
+
+func (m Model) pipelineSyntheticRows() []pipelineSyntheticRow {
+	job := m.selected
+	if job == nil {
+		return nil
+	}
+	rows := make([]pipelineSyntheticRow, 0, 6)
 	if m.testArtifact != nil {
-		maxCursor++
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowTest,
+			stepLabel:   "testing",
+			sessionStep: "tests",
+			status:      m.testStatus(),
+			provider:    "-",
+			tokens:      "-",
+			start:       m.testArtifact.CreatedAt,
+			duration:    "-",
+		})
 	}
 	if m.rebaseArtifact != nil {
-		maxCursor++
+		provider := "git"
+		if m.rebaseArtifact.Kind == "rebase_conflict" {
+			provider = "llm"
+		}
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowRebase,
+			stepLabel:   "rebasing",
+			sessionStep: "rebase",
+			status:      m.rebaseStatus(),
+			provider:    provider,
+			tokens:      "-",
+			start:       m.rebaseArtifact.CreatedAt,
+			duration:    "-",
+		})
 	}
-	if m.selected != nil && m.selected.PRURL != "" {
-		maxCursor++
+	if m.shouldShowCheckingCIRow() {
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowCheckingCI,
+			stepLabel:   "checking ci",
+			sessionStep: "awaiting_checks",
+			status:      m.checkingCIStatus(),
+			provider:    "github",
+			tokens:      "-",
+			start:       job.CIStartedAt,
+			duration:    m.checkingCIDuration(),
+		})
 	}
-	if m.selected != nil && m.selected.PRMergedAt != "" {
-		maxCursor++
+	if m.shouldShowPRCreatedRow() {
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowPRCreated,
+			stepLabel:   "pr created",
+			sessionStep: "approved",
+			status:      "completed",
+			provider:    "-",
+			tokens:      "-",
+			start:       job.CompletedAt,
+			duration:    "-",
+		})
 	}
-	if m.selected != nil && m.selected.PRClosedAt != "" {
-		maxCursor++
+	if job.PRMergedAt != "" {
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowMerged,
+			stepLabel:   "merged",
+			sessionStep: "merged",
+			status:      "completed",
+			provider:    "-",
+			tokens:      "-",
+			start:       job.PRMergedAt,
+			duration:    "-",
+		})
+	}
+	if job.PRClosedAt != "" {
+		rows = append(rows, pipelineSyntheticRow{
+			kind:        pipelineRowPRClosed,
+			stepLabel:   "pr closed",
+			sessionStep: "pr closed",
+			status:      "closed",
+			provider:    "-",
+			tokens:      "-",
+			start:       job.PRClosedAt,
+			duration:    "-",
+		})
+	}
+	return rows
+}
+
+func (m Model) shouldShowCheckingCIRow() bool {
+	job := m.selected
+	if job == nil || strings.TrimSpace(job.PRURL) == "" {
+		return false
+	}
+	if job.State == "awaiting_checks" {
+		return true
+	}
+	if job.CIStartedAt != "" || job.CICompletedAt != "" || job.CIStatusSummary != "" {
+		return true
+	}
+	if job.State == "rejected" && strings.Contains(strings.ToLower(job.RejectReason), "ci") {
+		return true
+	}
+	return false
+}
+
+func (m Model) shouldShowPRCreatedRow() bool {
+	job := m.selected
+	if job == nil || strings.TrimSpace(job.PRURL) == "" {
+		return false
+	}
+	if job.PRMergedAt != "" || job.PRClosedAt != "" {
+		return true
+	}
+	return job.State == "approved"
+}
+
+func (m Model) checkingCIStatus() string {
+	job := m.selected
+	if job == nil {
+		return "completed"
+	}
+	switch job.State {
+	case "awaiting_checks":
+		return "running"
+	case "rejected":
+		if m.shouldShowCheckingCIRow() {
+			return "failed"
+		}
+	case "cancelled":
+		if m.shouldShowCheckingCIRow() {
+			return "cancelled"
+		}
+	case "approved":
+		return "completed"
+	}
+	if job.CICompletedAt != "" {
+		return "completed"
+	}
+	if job.CIStartedAt != "" {
+		return "running"
+	}
+	return "completed"
+}
+
+func (m Model) checkingCIDuration() string {
+	job := m.selected
+	if job == nil {
+		return "-"
+	}
+	start, ok := parseTimestamp(job.CIStartedAt)
+	if !ok {
+		return "-"
+	}
+	end, ok := parseTimestamp(job.CICompletedAt)
+	if !ok {
+		if job.State != "awaiting_checks" {
+			return "-"
+		}
+		end = time.Now().UTC()
+	}
+	duration := end.Sub(start)
+	if duration < 0 {
+		duration = 0
+	}
+	return formatDuration(int(duration.Milliseconds()))
+}
+
+func (m Model) syntheticSessionNumber(step string) int {
+	rows := m.pipelineSyntheticRows()
+	for i := range rows {
+		if rows[i].sessionStep == step {
+			return len(m.sessions) + i + 1
+		}
+	}
+	return 0
+}
+
+func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
+	synthRows := m.pipelineSyntheticRows()
+	maxCursor := len(m.sessions) + len(synthRows) - 1
+	if maxCursor < 0 {
+		maxCursor = 0
 	}
 	switch key {
 	case "up", "k":
@@ -1073,42 +1260,28 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 		if m.sessCursor < len(m.sessions) {
 			return m, m.fetchFullSession
 		}
-		testRowIdx := len(m.sessions)
-		rebaseRowIdx := testRowIdx
-		if m.testArtifact != nil {
-			rebaseRowIdx++
-		}
-		prRowIdx := rebaseRowIdx
-		if m.rebaseArtifact != nil {
-			prRowIdx++
-		}
-		mergedRowIdx := prRowIdx
-		if m.selected != nil && m.selected.PRURL != "" {
-			mergedRowIdx++
-		}
-		closedRowIdx := mergedRowIdx
-		if m.selected != nil && m.selected.PRMergedAt != "" {
-			closedRowIdx++
-		}
-		if m.testArtifact != nil && m.sessCursor == testRowIdx {
-			m = m.enterTestView()
-			return m, nil
-		}
-		if m.rebaseArtifact != nil && m.sessCursor == rebaseRowIdx {
-			m = m.enterRebaseView()
-			return m, nil
-		}
-		if m.selected != nil && m.selected.PRURL != "" && m.sessCursor == prRowIdx {
-			m = m.enterPRView()
-			return m, nil
-		}
-		if m.selected != nil && m.selected.PRMergedAt != "" && m.sessCursor == mergedRowIdx {
-			m = m.enterMergedView()
-			return m, nil
-		}
-		if m.selected != nil && m.selected.PRClosedAt != "" && m.sessCursor == closedRowIdx {
-			m = m.enterPRClosedView()
-			return m, nil
+		idx := m.sessCursor - len(m.sessions)
+		if idx >= 0 && idx < len(synthRows) {
+			switch synthRows[idx].kind {
+			case pipelineRowTest:
+				m = m.enterTestView()
+				return m, nil
+			case pipelineRowRebase:
+				m = m.enterRebaseView()
+				return m, nil
+			case pipelineRowCheckingCI:
+				m = m.enterCheckingCIView()
+				return m, nil
+			case pipelineRowPRCreated:
+				m = m.enterPRView()
+				return m, nil
+			case pipelineRowMerged:
+				m = m.enterMergedView()
+				return m, nil
+			case pipelineRowPRClosed:
+				m = m.enterPRClosedView()
+				return m, nil
+			}
 		}
 	case "d":
 		if m.selected != nil && m.selected.WorktreePath != "" {
@@ -1248,7 +1421,7 @@ func (m Model) testStatus() string {
 		return "completed"
 	}
 	switch m.selected.State {
-	case "ready", "approved", "rejected":
+	case "ready", "awaiting_checks", "approved", "rejected":
 		return "completed"
 	case "cancelled":
 		return "cancelled"
@@ -1316,6 +1489,49 @@ func (m Model) enterRebaseView() Model {
 	m.showInput = false
 	m.scrollOffset = 0
 	m.lines = splitContent(m.selectedSession.ResponseText, m.selectedSession.Status, m.cw())
+	return m
+}
+
+// enterCheckingCIView enters Level 3 to display the CI polling status details.
+func (m Model) enterCheckingCIView() Model {
+	job := m.selected
+	if job == nil {
+		return m
+	}
+	status := m.checkingCIStatus()
+	var body []string
+	body = append(body, "Checking CI status for the pull request.")
+	if job.CIStatusSummary != "" {
+		body = append(body, "**Latest:** "+job.CIStatusSummary)
+	}
+	if job.CIStartedAt != "" {
+		body = append(body, "**Started:** "+formatTimestampLocal(job.CIStartedAt, "2006-01-02 15:04:05"))
+	}
+	if job.CICompletedAt != "" {
+		body = append(body, "**Completed:** "+formatTimestampLocal(job.CICompletedAt, "2006-01-02 15:04:05"))
+	}
+	if status == "failed" && job.RejectReason != "" {
+		body = append(body, "**Failure:** "+job.RejectReason)
+	}
+	if job.PRURL != "" {
+		body = append(body, "**PR:** "+job.PRURL)
+	}
+	createdAt := job.CIStartedAt
+	if strings.TrimSpace(createdAt) == "" {
+		createdAt = job.UpdatedAt
+	}
+	content := strings.Join(body, "\n\n")
+	m.selectedSession = &db.LLMSession{
+		Step:         "awaiting_checks",
+		LLMProvider:  "-",
+		Status:       status,
+		ResponseText: content,
+		PromptText:   "(polled by sync loop)",
+		CreatedAt:    createdAt,
+	}
+	m.showInput = false
+	m.scrollOffset = 0
+	m.lines = renderMarkdown(content, m.cw())
 	return m
 }
 
@@ -1648,22 +1864,8 @@ func (m Model) detailView() string {
 	// Session pipeline table.
 	b.WriteString("\n")
 	b.WriteString(titleStyle.Render("PIPELINE"))
-	stepCount := len(m.sessions)
-	if m.testArtifact != nil {
-		stepCount++
-	}
-	if m.rebaseArtifact != nil {
-		stepCount++
-	}
-	if job.PRURL != "" {
-		stepCount++
-	}
-	if job.PRMergedAt != "" {
-		stepCount++
-	}
-	if job.PRClosedAt != "" {
-		stepCount++
-	}
+	synthRows := m.pipelineSyntheticRows()
+	stepCount := len(m.sessions) + len(synthRows)
 	b.WriteString(dimStyle.Render(fmt.Sprintf("  %d steps", stepCount)))
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", w)))
@@ -1725,159 +1927,35 @@ func (m Model) detailView() string {
 			b.WriteString("\n")
 		}
 
-		// Test row (shell step, not an LLM session).
-		if m.testArtifact != nil {
-			testIdx := len(m.sessions)
-			isSelected := testIdx == m.sessCursor
+		for i, row := range synthRows {
+			idx := len(m.sessions) + i
+			isSelected := idx == m.sessCursor
 			cursor := "  "
 			if isSelected {
 				cursor = "> "
 			}
 
-			status := m.testStatus()
-			sst, ok := sessStatusStyle[status]
+			sst, ok := sessStatusStyle[row.status]
 			if !ok {
 				sst = dimStyle
 			}
+			if row.kind == pipelineRowMerged {
+				sst = stateStyle["merged"]
+			}
+			if row.kind == pipelineRowPRClosed {
+				sst = stateStyle["pr closed"]
+			}
+
 			textStyle := selectedCellStyle(plainStyle, isSelected)
 			statusCell := selectedCellStyle(sst, isSelected)
 			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", testIdx+1), sColNum)+padRight("testing", sColStep)) +
-				statusCell.Render(padRight(status, sColStatus)) +
-				textStyle.Render(padRight("-", sColProvider)) +
-				textStyle.Render(padRight("-", sColTokens)) +
-				dimCell.Render(padRight(formatTimestamp(m.testArtifact.CreatedAt), sColStart)) +
-				dimCell.Render(padRight("-", sColDuration))
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-
-		// Rebase row (shows rebase result or conflict artifact).
-		if m.rebaseArtifact != nil {
-			rebaseIdx := len(m.sessions)
-			if m.testArtifact != nil {
-				rebaseIdx++
-			}
-			isSelected := rebaseIdx == m.sessCursor
-			cursor := "  "
-			if isSelected {
-				cursor = "> "
-			}
-
-			status := m.rebaseStatus()
-			sst, ok := sessStatusStyle[status]
-			if !ok {
-				sst = dimStyle
-			}
-
-			provider := "git"
-			if m.rebaseArtifact.Kind == "rebase_conflict" {
-				provider = "llm"
-			}
-			textStyle := selectedCellStyle(plainStyle, isSelected)
-			statusCell := selectedCellStyle(sst, isSelected)
-			dimCell := selectedCellStyle(dimStyle, isSelected)
-
-			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", rebaseIdx+1), sColNum)+padRight("rebasing", sColStep)) +
-				statusCell.Render(padRight(status, sColStatus)) +
-				textStyle.Render(padRight(provider, sColProvider)) +
-				textStyle.Render(padRight("-", sColTokens)) +
-				dimCell.Render(padRight(formatTimestamp(m.rebaseArtifact.CreatedAt), sColStart)) +
-				dimCell.Render(padRight("-", sColDuration))
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-
-		// PR row (shows when a PR/MR was created).
-		if job.PRURL != "" {
-			prIdx := len(m.sessions)
-			if m.testArtifact != nil {
-				prIdx++
-			}
-			if m.rebaseArtifact != nil {
-				prIdx++
-			}
-			isSelected := prIdx == m.sessCursor
-			cursor := "  "
-			if isSelected {
-				cursor = "> "
-			}
-			textStyle := selectedCellStyle(plainStyle, isSelected)
-			statusCell := selectedCellStyle(sessStatusStyle["completed"], isSelected)
-			dimCell := selectedCellStyle(dimStyle, isSelected)
-
-			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", prIdx+1), sColNum)+padRight("pr created", sColStep)) +
-				statusCell.Render(padRight("completed", sColStatus)) +
-				textStyle.Render(padRight("-", sColProvider)) +
-				textStyle.Render(padRight("-", sColTokens)) +
-				dimCell.Render(padRight(formatTimestamp(job.CompletedAt), sColStart)) +
-				dimCell.Render(padRight("-", sColDuration))
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-
-		// Merged row (shows when the PR was merged remotely).
-		if job.PRMergedAt != "" {
-			mergedIdx := len(m.sessions)
-			if m.testArtifact != nil {
-				mergedIdx++
-			}
-			if m.rebaseArtifact != nil {
-				mergedIdx++
-			}
-			if job.PRURL != "" {
-				mergedIdx++
-			}
-			isSelected := mergedIdx == m.sessCursor
-			cursor := "  "
-			if isSelected {
-				cursor = "> "
-			}
-			textStyle := selectedCellStyle(plainStyle, isSelected)
-			statusCell := selectedCellStyle(stateStyle["merged"], isSelected)
-			dimCell := selectedCellStyle(dimStyle, isSelected)
-
-			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", mergedIdx+1), sColNum)+padRight("merged", sColStep)) +
-				statusCell.Render(padRight("completed", sColStatus)) +
-				textStyle.Render(padRight("-", sColProvider)) +
-				textStyle.Render(padRight("-", sColTokens)) +
-				dimCell.Render(padRight(formatTimestamp(job.PRMergedAt), sColStart)) +
-				dimCell.Render(padRight("-", sColDuration))
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-
-		// PR closed row (shows when the PR was closed without merging).
-		if job.PRClosedAt != "" {
-			closedIdx := len(m.sessions)
-			if m.testArtifact != nil {
-				closedIdx++
-			}
-			if m.rebaseArtifact != nil {
-				closedIdx++
-			}
-			if job.PRURL != "" {
-				closedIdx++
-			}
-			if job.PRMergedAt != "" {
-				closedIdx++
-			}
-			isSelected := closedIdx == m.sessCursor
-			cursor := "  "
-			if isSelected {
-				cursor = "> "
-			}
-			textStyle := selectedCellStyle(plainStyle, isSelected)
-			statusCell := selectedCellStyle(stateStyle["pr closed"], isSelected)
-			dimCell := selectedCellStyle(dimStyle, isSelected)
-
-			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", closedIdx+1), sColNum)+padRight("pr closed", sColStep)) +
-				statusCell.Render(padRight("closed", sColStatus)) +
-				textStyle.Render(padRight("-", sColProvider)) +
-				textStyle.Render(padRight("-", sColTokens)) +
-				dimCell.Render(padRight(formatTimestamp(job.PRClosedAt), sColStart)) +
-				dimCell.Render(padRight("-", sColDuration))
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", idx+1), sColNum)+padRight(row.stepLabel, sColStep)) +
+				statusCell.Render(padRight(row.status, sColStatus)) +
+				textStyle.Render(padRight(row.provider, sColProvider)) +
+				textStyle.Render(padRight(row.tokens, sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(row.start), sColStart)) +
+				dimCell.Render(padRight(row.duration, sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1943,50 +2021,11 @@ func (m Model) sessionView() string {
 			break
 		}
 	}
-	if sessNum == 0 && sess.Step == "tests" {
-		sessNum = len(m.sessions) + 1
+	if sessNum == 0 {
+		sessNum = m.syntheticSessionNumber(sess.Step)
 	}
-	if sessNum == 0 && sess.Step == "rebase" {
+	if sessNum == 0 {
 		sessNum = len(m.sessions) + 1
-		if m.testArtifact != nil {
-			sessNum++
-		}
-	}
-	if sessNum == 0 && sess.Step == "approved" {
-		sessNum = len(m.sessions) + 1
-		if m.testArtifact != nil {
-			sessNum++
-		}
-		if m.rebaseArtifact != nil {
-			sessNum++
-		}
-	}
-	if sessNum == 0 && sess.Step == "merged" {
-		sessNum = len(m.sessions) + 1
-		if m.testArtifact != nil {
-			sessNum++
-		}
-		if m.rebaseArtifact != nil {
-			sessNum++
-		}
-		if m.selected != nil && m.selected.PRURL != "" {
-			sessNum++
-		}
-	}
-	if sessNum == 0 && sess.Step == "pr closed" {
-		sessNum = len(m.sessions) + 1
-		if m.testArtifact != nil {
-			sessNum++
-		}
-		if m.rebaseArtifact != nil {
-			sessNum++
-		}
-		if m.selected != nil && m.selected.PRURL != "" {
-			sessNum++
-		}
-		if m.selected != nil && m.selected.PRMergedAt != "" {
-			sessNum++
-		}
 	}
 
 	b.WriteString(titleStyle.Render(fmt.Sprintf("SESSION #%d", sessNum)))
