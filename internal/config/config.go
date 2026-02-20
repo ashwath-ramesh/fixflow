@@ -15,7 +15,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 // Credentials holds tokens loaded from credentials.toml.
 type Credentials struct {
