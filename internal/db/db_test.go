@@ -179,18 +179,18 @@ func TestValidTransitionsContract(t *testing.T) {
 	t.Parallel()
 	t.Run("edges", func(t *testing.T) {
 		expected := map[string][]string{
-			"queued":       {"planning", "cancelled"},
-			"planning":     {"implementing", "failed", "cancelled"},
-			"implementing": {"reviewing", "failed", "cancelled"},
+			"queued":              {"planning", "cancelled"},
+			"planning":            {"implementing", "failed", "cancelled"},
+			"implementing":        {"reviewing", "failed", "cancelled"},
 			"reviewing":           {"implementing", "testing", "failed", "cancelled"},
 			"testing":             {"ready", "implementing", "rebasing", "failed", "cancelled"},
 			"rebasing":            {"resolving_conflicts", "ready", "failed", "cancelled"},
 			"resolving_conflicts": {"ready", "failed", "cancelled"},
 			"ready":               {"awaiting_checks", "approved", "rejected"},
-		"awaiting_checks":     {"approved", "rejected", "cancelled"},
-			"failed":       {"queued"},
-			"rejected":     {"queued"},
-			"cancelled":    {"queued"},
+			"awaiting_checks":     {"approved", "rejected", "cancelled"},
+			"failed":              {"queued"},
+			"rejected":            {"queued"},
+			"cancelled":           {"queued"},
 		}
 
 		if got, want := len(ValidTransitions), len(expected); got != want {
@@ -2742,10 +2742,23 @@ func TestAwaitingChecksTransitions(t *testing.T) {
 	if job.State != "awaiting_checks" {
 		t.Fatalf("expected awaiting_checks, got %q", job.State)
 	}
+	if job.CIStartedAt == "" {
+		t.Fatalf("expected ci_started_at to be set on ready->awaiting_checks")
+	}
+	if job.CICompletedAt != "" {
+		t.Fatalf("expected ci_completed_at to be empty while awaiting_checks, got %q", job.CICompletedAt)
+	}
 
 	// awaiting_checks -> approved
 	if err := store.TransitionState(ctx, jobID, "awaiting_checks", "approved"); err != nil {
 		t.Fatalf("transition awaiting_checks->approved: %v", err)
+	}
+	job, err = store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get approved job: %v", err)
+	}
+	if job.CICompletedAt == "" {
+		t.Fatalf("expected ci_completed_at after awaiting_checks->approved")
 	}
 
 	// awaiting_checks -> rejected
@@ -2753,17 +2766,70 @@ func TestAwaitingChecksTransitions(t *testing.T) {
 	if err := store.TransitionState(ctx, jobID2, "awaiting_checks", "rejected"); err != nil {
 		t.Fatalf("transition awaiting_checks->rejected: %v", err)
 	}
+	job2, err := store.GetJob(ctx, jobID2)
+	if err != nil {
+		t.Fatalf("get rejected job: %v", err)
+	}
+	if job2.CICompletedAt == "" {
+		t.Fatalf("expected ci_completed_at after awaiting_checks->rejected")
+	}
 
 	// awaiting_checks -> cancelled
 	jobID3 := createTestJobWithState(t, ctx, store, "ac-cancel", "awaiting_checks", "autopr/ac-3", "https://github.com/org/repo/pull/3", "", "")
 	if err := store.TransitionState(ctx, jobID3, "awaiting_checks", "cancelled"); err != nil {
 		t.Fatalf("transition awaiting_checks->cancelled: %v", err)
 	}
+	job3, err := store.GetJob(ctx, jobID3)
+	if err != nil {
+		t.Fatalf("get cancelled job: %v", err)
+	}
+	if job3.CICompletedAt == "" {
+		t.Fatalf("expected ci_completed_at after awaiting_checks->cancelled")
+	}
 
 	// Invalid: awaiting_checks -> planning
 	jobID4 := createTestJobWithState(t, ctx, store, "ac-invalid", "awaiting_checks", "autopr/ac-4", "https://github.com/org/repo/pull/4", "", "")
 	if err := store.TransitionState(ctx, jobID4, "awaiting_checks", "planning"); err == nil {
 		t.Fatalf("expected error for invalid transition awaiting_checks->planning")
+	}
+}
+
+func TestJobsTableHasCIMetadataColumns(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	rows, err := store.Reader.QueryContext(ctx, `PRAGMA table_info(jobs)`)
+	if err != nil {
+		t.Fatalf("pragma table_info(jobs): %v", err)
+	}
+	defer rows.Close()
+
+	found := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			typ       string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table info: %v", err)
+		}
+		found[name] = true
+	}
+	for _, col := range []string{"ci_started_at", "ci_completed_at", "ci_status_summary"} {
+		if !found[col] {
+			t.Fatalf("expected jobs column %q to exist", col)
+		}
 	}
 }
 
@@ -2822,5 +2888,36 @@ func TestCancelJobAwaitingChecks(t *testing.T) {
 	}
 	if job.State != "cancelled" {
 		t.Fatalf("expected cancelled state, got %q", job.State)
+	}
+	if job.CICompletedAt == "" {
+		t.Fatalf("expected ci_completed_at on cancel from awaiting_checks")
+	}
+}
+
+func TestRejectJobAwaitingChecksSetsCICompletedAt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	jobID := createTestJobWithState(t, ctx, store, "reject-ac", "awaiting_checks", "autopr/reject-ac", "https://github.com/org/repo/pull/22", "", "")
+	if err := store.RejectJob(ctx, jobID, "awaiting_checks", "CI check failed: lint"); err != nil {
+		t.Fatalf("reject awaiting_checks job: %v", err)
+	}
+
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.State != "rejected" {
+		t.Fatalf("expected rejected state, got %q", job.State)
+	}
+	if job.CICompletedAt == "" {
+		t.Fatalf("expected ci_completed_at to be set after reject from awaiting_checks")
 	}
 }

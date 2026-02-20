@@ -19,12 +19,12 @@ type Syncer struct {
 	store *db.Store
 	jobCh chan<- string
 
-	findGitHubPRByBranch     func(ctx context.Context, token, owner, repo, head, state string) (string, error)
-	findGitLabMRByBranch     func(ctx context.Context, token, baseURL, projectID, sourceBranch, state string) (string, error)
-	checkGitHubPRStatus      func(ctx context.Context, token, prURL string) (git.PRMergeStatus, error)
-	checkGitLabMRStatus      func(ctx context.Context, token, baseURL, mrURL string) (git.PRMergeStatus, error)
-	deleteRemoteBranch       func(ctx context.Context, dir, branchName string) error
-	getGitHubCheckRunStatus  func(ctx context.Context, token, owner, repo, ref string) (git.CheckRunStatus, error)
+	findGitHubPRByBranch    func(ctx context.Context, token, owner, repo, head, state string) (string, error)
+	findGitLabMRByBranch    func(ctx context.Context, token, baseURL, projectID, sourceBranch, state string) (string, error)
+	checkGitHubPRStatus     func(ctx context.Context, token, prURL string) (git.PRMergeStatus, error)
+	checkGitLabMRStatus     func(ctx context.Context, token, baseURL, mrURL string) (git.PRMergeStatus, error)
+	deleteRemoteBranch      func(ctx context.Context, dir, branchName string) error
+	getGitHubCheckRunStatus func(ctx context.Context, token, owner, repo, ref string) (git.CheckRunStatus, error)
 }
 
 func NewSyncer(cfg *config.Config, store *db.Store, jobCh chan<- string) *Syncer {
@@ -319,6 +319,9 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 
 		// Non-GitHub projects: auto-approve (CI polling not supported).
 		if proj.GitHub == nil {
+			if err := s.store.UpdateJobCIStatusSummary(ctx, job.ID, "CI polling skipped: non-GitHub project"); err != nil {
+				slog.Warn("check CI: persist summary", "job", job.ID, "err", err)
+			}
 			if err := s.store.TransitionState(ctx, job.ID, "awaiting_checks", "approved"); err != nil {
 				slog.Error("check CI: auto-approve non-GitHub job", "job", job.ID, "err", err)
 			}
@@ -331,9 +334,16 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 		}
 
 		// Timeout check.
-		updatedAt, ok := parseTimestamp(job.UpdatedAt)
+		timeoutBase := strings.TrimSpace(job.CIStartedAt)
+		if timeoutBase == "" {
+			timeoutBase = job.UpdatedAt
+		}
+		updatedAt, ok := parseTimestamp(timeoutBase)
 		if ok && time.Since(updatedAt) > ciTimeout {
 			reason := fmt.Sprintf("CI check timeout: no result after %s", ciTimeout)
+			if err := s.store.UpdateJobCIStatusSummary(ctx, job.ID, reason); err != nil {
+				slog.Warn("check CI: persist timeout summary", "job", job.ID, "err", err)
+			}
 			if err := s.store.RejectJob(ctx, job.ID, "awaiting_checks", reason); err != nil {
 				slog.Error("check CI: reject timed-out job", "job", job.ID, "err", err)
 			} else {
@@ -356,6 +366,9 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 			slog.Warn("check CI: get check-run status", "job", job.ID, "err", err)
 			continue
 		}
+		if err := s.store.UpdateJobCIStatusSummary(ctx, job.ID, formatCISummary(status)); err != nil {
+			slog.Warn("check CI: persist summary", "job", job.ID, "err", err)
+		}
 
 		// No checks registered yet — wait for next poll.
 		if status.Total == 0 {
@@ -368,6 +381,9 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 			if status.FailedCheckURL != "" {
 				reason += " (" + status.FailedCheckURL + ")"
 			}
+			if err := s.store.UpdateJobCIStatusSummary(ctx, job.ID, reason); err != nil {
+				slog.Warn("check CI: persist failed summary", "job", job.ID, "err", err)
+			}
 			if err := s.store.RejectJob(ctx, job.ID, "awaiting_checks", reason); err != nil {
 				slog.Error("check CI: reject failed job", "job", job.ID, "err", err)
 			} else {
@@ -378,6 +394,9 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 
 		// All completed and passed → approve.
 		if status.Pending == 0 && status.Passed > 0 {
+			if err := s.store.UpdateJobCIStatusSummary(ctx, job.ID, fmt.Sprintf("CI checks passed: %d/%d completed", status.Passed, status.Total)); err != nil {
+				slog.Warn("check CI: persist passed summary", "job", job.ID, "err", err)
+			}
 			if err := s.store.TransitionState(ctx, job.ID, "awaiting_checks", "approved"); err != nil {
 				slog.Error("check CI: approve job", "job", job.ID, "err", err)
 			} else {
@@ -388,6 +407,27 @@ func (s *Syncer) CheckCIStatus(ctx context.Context) {
 
 		// Still pending — wait for next poll cycle.
 	}
+}
+
+func formatCISummary(status git.CheckRunStatus) string {
+	if status.Total == 0 {
+		return "CI checks pending: no check-runs registered yet"
+	}
+	summary := fmt.Sprintf(
+		"CI checks: total=%d completed=%d passed=%d failed=%d pending=%d",
+		status.Total,
+		status.Completed,
+		status.Passed,
+		status.Failed,
+		status.Pending,
+	)
+	if status.FailedCheckName != "" {
+		summary += fmt.Sprintf(" (first failed: %s)", status.FailedCheckName)
+		if status.FailedCheckURL != "" {
+			summary += " " + status.FailedCheckURL
+		}
+	}
+	return summary
 }
 
 // parseTimestamp parses an RFC3339 timestamp string.
