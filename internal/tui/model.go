@@ -32,6 +32,7 @@ var (
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46"))
 	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("37"))
 	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")).Background(lipgloss.Color("236"))
+	plainStyle    = lipgloss.NewStyle()
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	labelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	dotRunning    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")).Render("●")
@@ -68,6 +69,13 @@ var (
 	activeTab     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")).Underline(true)
 	inactiveTab   = dimStyle
 )
+
+func selectedCellStyle(base lipgloss.Style, selected bool) lipgloss.Style {
+	if !selected {
+		return base
+	}
+	return base.Inherit(selectedStyle)
+}
 
 const (
 	filterAllState   = "all"
@@ -1494,9 +1502,9 @@ func (m Model) listView() string {
 		b.WriteString("\n")
 
 		for i, job := range m.jobs[start:end] {
+			isSelected := start+i == m.cursor
 			cursor := "  "
-			jobIdx := start + i
-			if jobIdx == m.cursor {
+			if isSelected {
 				cursor = "> "
 			}
 
@@ -1517,19 +1525,17 @@ func (m Model) listView() string {
 			title := truncate(job.IssueTitle, colIssue-2)
 
 			updated := formatTimestampLocal(job.UpdatedAt, "15:04:05")
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			stateCell := selectedCellStyle(st, isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(db.ShortID(job.ID), colJob) +
-				st.Render(padRight(displayState, colState)) +
-				padRight(truncate(job.ProjectName, colProject-1), colProject) +
-				padRight(source, colSource) +
-				padRight(fmt.Sprintf("%d/%d", job.Iteration, job.MaxIterations), colRetry) +
-				padRight(title, colIssue) +
-				dimStyle.Render(updated)
-
-			if jobIdx == m.cursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(db.ShortID(job.ID), colJob)) +
+				stateCell.Render(padRight(displayState, colState)) +
+				textStyle.Render(padRight(truncate(job.ProjectName, colProject-1), colProject)) +
+				textStyle.Render(padRight(source, colSource)) +
+				textStyle.Render(padRight(fmt.Sprintf("%d/%d", job.Iteration, job.MaxIterations), colRetry)) +
+				textStyle.Render(padRight(title, colIssue)) +
+				dimCell.Render(updated)
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1690,8 +1696,9 @@ func (m Model) detailView() string {
 		b.WriteString("\n")
 
 		for i, s := range m.sessions {
+			isSelected := i == m.sessCursor
 			cursor := "  "
-			if i == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
 
@@ -1704,19 +1711,16 @@ func (m Model) detailView() string {
 			tokens := fmt.Sprintf("%d/%d", s.InputTokens, s.OutputTokens)
 			start := formatTimestamp(s.CreatedAt)
 			dur := formatDuration(s.DurationMS)
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(sst, isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", i+1), sColNum) +
-				padRight(stepDisplay, sColStep) +
-				sst.Render(padRight(s.Status, sColStatus)) +
-				padRight(s.LLMProvider, sColProvider) +
-				padRight(tokens, sColTokens) +
-				dimStyle.Render(padRight(start, sColStart)) +
-				dimStyle.Render(padRight(dur, sColDuration))
-
-			if i == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", i+1), sColNum)+padRight(stepDisplay, sColStep)) +
+				statusCell.Render(padRight(s.Status, sColStatus)) +
+				textStyle.Render(padRight(s.LLMProvider, sColProvider)) +
+				textStyle.Render(padRight(tokens, sColTokens)) +
+				dimCell.Render(padRight(start, sColStart)) +
+				dimCell.Render(padRight(dur, sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1724,8 +1728,9 @@ func (m Model) detailView() string {
 		// Test row (shell step, not an LLM session).
 		if m.testArtifact != nil {
 			testIdx := len(m.sessions)
+			isSelected := testIdx == m.sessCursor
 			cursor := "  "
-			if testIdx == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
 
@@ -1734,19 +1739,16 @@ func (m Model) detailView() string {
 			if !ok {
 				sst = dimStyle
 			}
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(sst, isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", testIdx+1), sColNum) +
-				padRight("testing", sColStep) +
-				sst.Render(padRight(status, sColStatus)) +
-				padRight("-", sColProvider) +
-				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(formatTimestamp(m.testArtifact.CreatedAt), sColStart)) +
-				dimStyle.Render(padRight("-", sColDuration))
-
-			if testIdx == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", testIdx+1), sColNum)+padRight("testing", sColStep)) +
+				statusCell.Render(padRight(status, sColStatus)) +
+				textStyle.Render(padRight("-", sColProvider)) +
+				textStyle.Render(padRight("-", sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(m.testArtifact.CreatedAt), sColStart)) +
+				dimCell.Render(padRight("-", sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1757,8 +1759,9 @@ func (m Model) detailView() string {
 			if m.testArtifact != nil {
 				rebaseIdx++
 			}
+			isSelected := rebaseIdx == m.sessCursor
 			cursor := "  "
-			if rebaseIdx == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
 
@@ -1772,19 +1775,16 @@ func (m Model) detailView() string {
 			if m.rebaseArtifact.Kind == "rebase_conflict" {
 				provider = "llm"
 			}
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(sst, isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", rebaseIdx+1), sColNum) +
-				padRight("rebasing", sColStep) +
-				sst.Render(padRight(status, sColStatus)) +
-				padRight(provider, sColProvider) +
-				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(formatTimestamp(m.rebaseArtifact.CreatedAt), sColStart)) +
-				dimStyle.Render(padRight("-", sColDuration))
-
-			if rebaseIdx == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", rebaseIdx+1), sColNum)+padRight("rebasing", sColStep)) +
+				statusCell.Render(padRight(status, sColStatus)) +
+				textStyle.Render(padRight(provider, sColProvider)) +
+				textStyle.Render(padRight("-", sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(m.rebaseArtifact.CreatedAt), sColStart)) +
+				dimCell.Render(padRight("-", sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1798,23 +1798,21 @@ func (m Model) detailView() string {
 			if m.rebaseArtifact != nil {
 				prIdx++
 			}
+			isSelected := prIdx == m.sessCursor
 			cursor := "  "
-			if prIdx == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(sessStatusStyle["completed"], isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", prIdx+1), sColNum) +
-				padRight("pr created", sColStep) +
-				sessStatusStyle["completed"].Render(padRight("completed", sColStatus)) +
-				padRight("-", sColProvider) +
-				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(formatTimestamp(job.CompletedAt), sColStart)) +
-				dimStyle.Render(padRight("-", sColDuration))
-
-			if prIdx == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", prIdx+1), sColNum)+padRight("pr created", sColStep)) +
+				statusCell.Render(padRight("completed", sColStatus)) +
+				textStyle.Render(padRight("-", sColProvider)) +
+				textStyle.Render(padRight("-", sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(job.CompletedAt), sColStart)) +
+				dimCell.Render(padRight("-", sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1831,23 +1829,21 @@ func (m Model) detailView() string {
 			if job.PRURL != "" {
 				mergedIdx++
 			}
+			isSelected := mergedIdx == m.sessCursor
 			cursor := "  "
-			if mergedIdx == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(stateStyle["merged"], isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", mergedIdx+1), sColNum) +
-				padRight("merged", sColStep) +
-				stateStyle["merged"].Render(padRight("completed", sColStatus)) +
-				padRight("-", sColProvider) +
-				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(formatTimestamp(job.PRMergedAt), sColStart)) +
-				dimStyle.Render(padRight("-", sColDuration))
-
-			if mergedIdx == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", mergedIdx+1), sColNum)+padRight("merged", sColStep)) +
+				statusCell.Render(padRight("completed", sColStatus)) +
+				textStyle.Render(padRight("-", sColProvider)) +
+				textStyle.Render(padRight("-", sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(job.PRMergedAt), sColStart)) +
+				dimCell.Render(padRight("-", sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -1867,23 +1863,21 @@ func (m Model) detailView() string {
 			if job.PRMergedAt != "" {
 				closedIdx++
 			}
+			isSelected := closedIdx == m.sessCursor
 			cursor := "  "
-			if closedIdx == m.sessCursor {
+			if isSelected {
 				cursor = "> "
 			}
+			textStyle := selectedCellStyle(plainStyle, isSelected)
+			statusCell := selectedCellStyle(stateStyle["pr closed"], isSelected)
+			dimCell := selectedCellStyle(dimStyle, isSelected)
 
-			line := cursor +
-				padRight(fmt.Sprintf("%d", closedIdx+1), sColNum) +
-				padRight("pr closed", sColStep) +
-				stateStyle["pr closed"].Render(padRight("closed", sColStatus)) +
-				padRight("-", sColProvider) +
-				padRight("-", sColTokens) +
-				dimStyle.Render(padRight(formatTimestamp(job.PRClosedAt), sColStart)) +
-				dimStyle.Render(padRight("-", sColDuration))
-
-			if closedIdx == m.sessCursor {
-				line = selectedStyle.Render(line)
-			}
+			line := textStyle.Render(cursor+padRight(fmt.Sprintf("%d", closedIdx+1), sColNum)+padRight("pr closed", sColStep)) +
+				statusCell.Render(padRight("closed", sColStatus)) +
+				textStyle.Render(padRight("-", sColProvider)) +
+				textStyle.Render(padRight("-", sColTokens)) +
+				dimCell.Render(padRight(formatTimestamp(job.PRClosedAt), sColStart)) +
+				dimCell.Render(padRight("-", sColDuration))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}

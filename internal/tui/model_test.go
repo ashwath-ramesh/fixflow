@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
+
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func TestFilterGhostSessions(t *testing.T) {
 	sessions := []db.LLMSessionSummary{
@@ -51,6 +54,91 @@ func TestSelectedStyleRendersBackgroundInANSI256(t *testing.T) {
 	if !strings.Contains(rendered, "48;5;236") {
 		t.Fatalf("expected selectedStyle to render ANSI256 background 236, got: %q", rendered)
 	}
+}
+
+func TestListViewSelectedRowKeepsBackgroundAcrossStyledCells(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	job := db.Job{
+		ID:            "ap-job-1234",
+		State:         "ready",
+		ProjectName:   "proj",
+		IssueSource:   "github",
+		SourceIssueID: "42",
+		IssueTitle:    "selected row background",
+		UpdatedAt:     "2025-02-19T14:04:05Z",
+	}
+	m := Model{
+		cfg: &config.Config{
+			Daemon: config.DaemonConfig{
+				SyncInterval: "5m",
+				MaxWorkers:   1,
+			},
+		},
+		jobs:   []db.Job{job},
+		cursor: 0,
+	}
+
+	line := findLineContainingText(t, m.listView(), db.ShortID(job.ID))
+	if !strings.Contains(stripANSI(line), "> ") {
+		t.Fatalf("expected selected cursor marker in line, got: %q", stripANSI(line))
+	}
+	if got := strings.Count(line, "48;5;236"); got < 3 {
+		t.Fatalf("expected selected row background to be reapplied across styled cells, got %d: %q", got, line)
+	}
+}
+
+func TestDetailViewSelectedPipelineRowKeepsBackgroundAcrossStyledCells(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	job := db.Job{
+		ID:          "ap-job-1234",
+		State:       "implementing",
+		ProjectName: "proj",
+	}
+	m := Model{
+		selected: &job,
+		sessions: []db.LLMSessionSummary{
+			{
+				ID:           1,
+				Step:         "plan",
+				Status:       "completed",
+				LLMProvider:  "codex",
+				InputTokens:  1,
+				OutputTokens: 2,
+				DurationMS:   3000,
+				CreatedAt:    "2025-02-19T14:01:02Z",
+			},
+		},
+		sessCursor: 0,
+	}
+
+	line := findLineContainingText(t, m.detailView(), "codex")
+	if !strings.Contains(stripANSI(line), "> ") {
+		t.Fatalf("expected selected cursor marker in line, got: %q", stripANSI(line))
+	}
+	if got := strings.Count(line, "48;5;236"); got < 3 {
+		t.Fatalf("expected selected pipeline row background to be reapplied across styled cells, got %d: %q", got, line)
+	}
+}
+
+func stripANSI(s string) string {
+	return ansiRegexp.ReplaceAllString(s, "")
+}
+
+func findLineContainingText(t *testing.T, view, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(stripANSI(line), want) {
+			return line
+		}
+	}
+	t.Fatalf("could not find line containing %q in:\n%s", want, view)
+	return ""
 }
 
 func TestListViewShowsFilterIndicatorAndFooterHints(t *testing.T) {
