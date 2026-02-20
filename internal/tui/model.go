@@ -46,8 +46,8 @@ var (
 		"rebasing":            lipgloss.NewStyle().Foreground(lipgloss.Color("135")),
 		"resolving":           lipgloss.NewStyle().Foreground(lipgloss.Color("202")),
 		"resolving_conflicts": lipgloss.NewStyle().Foreground(lipgloss.Color("202")),
-		"checking ci":        lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
-		"awaiting_checks":    lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
+		"checking ci":         lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
+		"awaiting_checks":     lipgloss.NewStyle().Foreground(lipgloss.Color("33")),
 		"approved":            lipgloss.NewStyle().Foreground(lipgloss.Color("40")),
 		"merged":              lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
 		"pr closed":           lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
@@ -130,13 +130,13 @@ type Model struct {
 	sessCursor     int
 
 	// Level 2: confirmation prompt and action feedback
-	confirmAction   string // "approve", "reject", "retry", "cancel", or "" (none)
-	confirmDraft    bool   // true when approve should create a draft PR
-	confirmJobID    string // explicit target for confirmation actions (used by list-view cancel)
-	confirmText     bool   // true when waiting for text input (reject reason / retry notes)
-	confirmTextBuf  string // accumulated text from key events
-	actionErr       error  // non-fatal error from last action (shown inline)
-	actionWarn      string // non-fatal warning from last successful action
+	confirmAction  string // "approve", "merge", "reject", "retry", "cancel", or "" (none)
+	confirmDraft   bool   // true when approve should create a draft PR
+	confirmJobID   string // explicit target for confirmation actions (used by list-view cancel)
+	confirmText    bool   // true when waiting for text input (reject reason / retry notes)
+	confirmTextBuf string // accumulated text from key events
+	actionErr      error  // non-fatal error from last action (shown inline)
+	actionWarn     string // non-fatal warning from last successful action
 
 	// Level 2d: diff view
 	showDiff   bool
@@ -486,6 +486,51 @@ func (m Model) executeCancel() tea.Msg {
 	return actionResultMsg{action: "cancel", warn: strings.Join(warns, "; ")}
 }
 
+func (m Model) executeMerge() tea.Msg {
+	ctx := context.Background()
+	jobID := m.confirmTargetJobID()
+	if jobID == "" {
+		return actionResultMsg{action: "merge", err: fmt.Errorf("no job selected")}
+	}
+
+	job, err := m.store.GetJob(ctx, jobID)
+	if err != nil {
+		return actionResultMsg{action: "merge", err: err}
+	}
+	if !canMergePR(&job) {
+		return actionResultMsg{action: "merge", err: fmt.Errorf("job %s is not mergeable", db.ShortID(jobID))}
+	}
+
+	proj, ok := m.cfg.ProjectByName(job.ProjectName)
+	if !ok {
+		return actionResultMsg{action: "merge", err: fmt.Errorf("project %q not found", job.ProjectName)}
+	}
+
+	switch {
+	case proj.GitHub != nil:
+		if m.cfg.Tokens.GitHub == "" {
+			return actionResultMsg{action: "merge", err: fmt.Errorf("GITHUB_TOKEN required to merge PR")}
+		}
+		if err := git.MergeGitHubPR(ctx, m.cfg.Tokens.GitHub, job.PRURL, "merge"); err != nil {
+			return actionResultMsg{action: "merge", err: err}
+		}
+	case proj.GitLab != nil:
+		if m.cfg.Tokens.GitLab == "" {
+			return actionResultMsg{action: "merge", err: fmt.Errorf("GITLAB_TOKEN required to merge MR")}
+		}
+		if err := git.MergeGitLabMR(ctx, m.cfg.Tokens.GitLab, proj.GitLab.BaseURL, job.PRURL, false); err != nil {
+			return actionResultMsg{action: "merge", err: err}
+		}
+	default:
+		return actionResultMsg{action: "merge", err: fmt.Errorf("project %q has no GitHub or GitLab config for PR merge", proj.Name)}
+	}
+
+	if err := m.store.MarkJobMerged(ctx, job.ID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		return actionResultMsg{action: "merge", err: err}
+	}
+	return actionResultMsg{action: "merge"}
+}
+
 func (m Model) cleanupCancelledJobWorktree(ctx context.Context, job db.Job) error {
 	if job.WorktreePath == "" {
 		return nil
@@ -628,10 +673,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionErr = msg.err
 			m.actionWarn = ""
 		} else {
-			// Action succeeded — refresh and keep detail view for approve.
+			// Action succeeded — refresh and keep detail view for approve/merge.
 			m.actionErr = nil
 			m.actionWarn = msg.warn
-			if msg.action == "approve" && m.selected != nil {
+			if (msg.action == "approve" || msg.action == "merge") && m.selected != nil {
 				return m, tea.Batch(m.fetchJobs, m.fetchSessions, m.fetchIssueSummary)
 			}
 			// Other actions keep existing behavior: return to Level 1.
@@ -739,6 +784,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch action {
 			case "approve":
 				return m, m.executeApprove
+			case "merge":
+				return m, m.executeMerge
 			case "reject":
 				m.confirmText = true
 				m.confirmTextBuf = ""
@@ -1092,6 +1139,10 @@ func (m Model) handleKeyLevel2(key string) (tea.Model, tea.Cmd) {
 	case "c":
 		if m.selected != nil && db.IsCancellableState(m.selected.State) {
 			startConfirm(&m, "cancel", m.selected.ID)
+		}
+	case "m":
+		if canMergePR(m.selected) {
+			startConfirm(&m, "merge", m.selected.ID)
 		}
 	case "esc":
 		m.confirmDraft = false
@@ -1868,6 +1919,9 @@ func (m Model) detailView() string {
 	if job.State == "ready" {
 		hintParts = append(hintParts, "a approve", "A draft", "x reject")
 	}
+	if canMergePR(job) {
+		hintParts = append(hintParts, "m merge")
+	}
 	if job.State == "failed" || job.State == "rejected" || job.State == "cancelled" {
 		hintParts = append(hintParts, "R retry")
 	}
@@ -2129,6 +2183,8 @@ func (m Model) confirmPrompt() string {
 			return "Approve job " + short + " and create draft PR?"
 		}
 		return "Approve job " + short + " and create PR?"
+	case "merge":
+		return "Merge PR for job " + short + "?"
 	case "reject":
 		return "Reject job " + short + "?"
 	case "retry":
@@ -2138,6 +2194,14 @@ func (m Model) confirmPrompt() string {
 	default:
 		return ""
 	}
+}
+
+func canMergePR(job *db.Job) bool {
+	return job != nil &&
+		job.State == "approved" &&
+		job.PRURL != "" &&
+		job.PRMergedAt == "" &&
+		job.PRClosedAt == ""
 }
 
 func (m Model) confirmTextPrompt() string {

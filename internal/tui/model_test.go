@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -335,6 +338,126 @@ func TestDetailViewCancelPromptAndConfirmNo(t *testing.T) {
 	}
 }
 
+func TestDetailViewMergeHintVisibility(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:         "ap-job-merge-1",
+		State:      "approved",
+		PRURL:      "https://github.com/org/repo/pull/1",
+		PRClosedAt: "",
+	}
+	m := Model{selected: &job}
+	if !strings.Contains(m.detailView(), "m merge") {
+		t.Fatalf("expected merge hint for approved job with open PR")
+	}
+
+	job.State = "ready"
+	m.selected = &job
+	if strings.Contains(m.detailView(), "m merge") {
+		t.Fatalf("did not expect merge hint when job not approved")
+	}
+
+	job.State = "approved"
+	job.PRURL = ""
+	m.selected = &job
+	if strings.Contains(m.detailView(), "m merge") {
+		t.Fatalf("did not expect merge hint when PR URL missing")
+	}
+
+	job.PRURL = "https://github.com/org/repo/pull/1"
+	job.PRMergedAt = "2025-02-19T14:04:05Z"
+	m.selected = &job
+	if strings.Contains(m.detailView(), "m merge") {
+		t.Fatalf("did not expect merge hint when PR already merged")
+	}
+
+	job.PRMergedAt = ""
+	job.PRClosedAt = "2025-02-19T14:05:06Z"
+	m.selected = &job
+	if strings.Contains(m.detailView(), "m merge") {
+		t.Fatalf("did not expect merge hint when PR already closed")
+	}
+}
+
+func TestHandleKeyMergeStartsConfirmationWhenEligible(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:    "ap-job-merge-2",
+		State: "approved",
+		PRURL: "https://github.com/org/repo/pull/2",
+	}
+	m := Model{selected: &job}
+
+	modelAny, _ := m.handleKey(keyRunes('m'))
+	m = modelAny.(Model)
+	if m.confirmAction != "merge" {
+		t.Fatalf("expected confirmAction=merge, got %q", m.confirmAction)
+	}
+	if m.confirmJobID != job.ID {
+		t.Fatalf("expected confirmJobID=%q, got %q", job.ID, m.confirmJobID)
+	}
+}
+
+func TestHandleKeyMergeNoopWhenIneligible(t *testing.T) {
+	t.Parallel()
+
+	cases := []db.Job{
+		{ID: "ap-job-merge-3", State: "ready", PRURL: "https://github.com/org/repo/pull/3"},
+		{ID: "ap-job-merge-4", State: "approved", PRURL: ""},
+		{ID: "ap-job-merge-5", State: "approved", PRURL: "https://github.com/org/repo/pull/5", PRMergedAt: "2025-02-19T14:04:05Z"},
+		{ID: "ap-job-merge-6", State: "approved", PRURL: "https://github.com/org/repo/pull/6", PRClosedAt: "2025-02-19T14:05:06Z"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.ID, func(t *testing.T) {
+			t.Parallel()
+			m := Model{selected: &tc}
+			modelAny, _ := m.handleKey(keyRunes('m'))
+			m = modelAny.(Model)
+			if m.confirmAction != "" || m.confirmJobID != "" {
+				t.Fatalf("expected merge key to be no-op for ineligible job")
+			}
+		})
+	}
+}
+
+func TestConfirmPromptMerge(t *testing.T) {
+	t.Parallel()
+
+	m := Model{
+		confirmAction: "merge",
+		confirmJobID:  "ap-job-merge-7",
+	}
+	want := "Merge PR for job " + db.ShortID(m.confirmJobID) + "?"
+	if got := m.confirmPrompt(); got != want {
+		t.Fatalf("confirmPrompt() = %q, want %q", got, want)
+	}
+}
+
+func TestMergeConfirmYesReturnsExecuteCmd(t *testing.T) {
+	t.Parallel()
+
+	job := db.Job{
+		ID:    "ap-job-merge-8",
+		State: "approved",
+		PRURL: "https://github.com/org/repo/pull/8",
+	}
+	m := Model{selected: &job}
+
+	modelAny, _ := m.handleKey(keyRunes('m'))
+	m = modelAny.(Model)
+	modelAny, cmd := m.handleKey(keyRunes('y'))
+	m = modelAny.(Model)
+	if m.confirmAction != "merge" {
+		t.Fatalf("expected merge confirmation to remain pending until action result")
+	}
+	if cmd == nil {
+		t.Fatalf("expected execute merge command")
+	}
+}
+
 func TestCancelConfirmYesCancelsJob(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -467,6 +590,30 @@ func newTestModelWithQueuedJob(t *testing.T, tmp string) (Model, *db.Store, stri
 	}
 	m.jobs = jobs
 	m.cursor = 0
+	return m, store, jobID
+}
+
+func newMergeExecutionModel(t *testing.T, tmp, prURL string) (Model, *db.Store, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	m, store, jobID := newTestModelWithQueuedJob(t, tmp)
+	if _, err := store.Writer.ExecContext(ctx, `
+		UPDATE jobs
+		SET state = 'approved', pr_url = ?, pr_merged_at = '', pr_closed_at = ''
+		WHERE id = ?`, prURL, jobID); err != nil {
+		store.Close()
+		t.Fatalf("seed mergeable job: %v", err)
+	}
+
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
+	if err != nil {
+		store.Close()
+		t.Fatalf("list jobs: %v", err)
+	}
+	m.jobs = jobs
+	m.selected = &m.jobs[0]
+	m.confirmJobID = jobID
 	return m, store, jobID
 }
 
@@ -1306,6 +1453,39 @@ func TestApproveSuccessKeepsDetailViewAndRefreshesJobsSessionsSummary(t *testing
 	}
 }
 
+func TestMergeSuccessKeepsDetailViewAndRefreshesJobsSessionsSummary(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	m, store, _ := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+	m.selected = &m.jobs[0]
+	m.confirmAction = "merge"
+	m.confirmJobID = m.selected.ID
+
+	modelAny, cmd := m.Update(actionResultMsg{action: "merge"})
+	m = modelAny.(Model)
+
+	if m.confirmAction != "" || m.confirmJobID != "" {
+		t.Fatalf("expected confirmation state cleared after merge success")
+	}
+	if m.selected == nil {
+		t.Fatalf("expected selected job to stay open on merge success")
+	}
+	if got, want := batchCmdCount(t, cmd), 3; got != want {
+		t.Fatalf("expected %d refresh commands for merge success, got %d", want, got)
+	}
+	if !batchHasMessageType(t, cmd, "jobs") {
+		t.Fatalf("expected merge success refresh to include jobs fetch")
+	}
+	if !batchHasMessageType(t, cmd, "sessions") {
+		t.Fatalf("expected merge success refresh to include sessions fetch")
+	}
+	if !batchHasMessageType(t, cmd, "summary") {
+		t.Fatalf("expected merge success refresh to include issue summary fetch")
+	}
+}
+
 func TestNonApproveSuccessKeepsExistingNavigationReset(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -1330,6 +1510,180 @@ func TestNonApproveSuccessKeepsExistingNavigationReset(t *testing.T) {
 	}
 	if batchHasMessageType(t, cmd, "sessions") {
 		t.Fatalf("did not expect sessions refresh for non-approve success")
+	}
+}
+
+func TestExecuteMergeGitLabSuccessMarksJobMerged(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	var gotPath string
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("tcp listener unavailable in sandbox: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "gl-token" {
+			t.Fatalf("unexpected token header: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"state":"merged"}`))
+	}))
+	srv.Listener = ln
+	srv.Start()
+	defer srv.Close()
+
+	m, store, jobID := newTestModelWithQueuedJob(t, tmp)
+	defer store.Close()
+
+	prURL := srv.URL + "/group/repo/-/merge_requests/123"
+	if _, err := store.Writer.ExecContext(ctx, `
+		UPDATE jobs
+		SET state = 'approved', pr_url = ?, pr_merged_at = '', pr_closed_at = ''
+		WHERE id = ?`, prURL, jobID); err != nil {
+		t.Fatalf("seed approved PR job: %v", err)
+	}
+
+	jobs, err := store.ListJobs(ctx, "", "all", "updated_at", false)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	m.jobs = jobs
+	m.selected = &m.jobs[0]
+	m.confirmJobID = jobID
+	m.cfg = &config.Config{
+		Tokens: config.TokensConfig{GitLab: "gl-token"},
+		Projects: []config.ProjectConfig{
+			{
+				Name: "myproject",
+				GitLab: &config.ProjectGitLab{
+					BaseURL:   srv.URL,
+					ProjectID: "group/repo",
+				},
+			},
+		},
+	}
+
+	msg := m.executeMerge()
+	res, ok := msg.(actionResultMsg)
+	if !ok {
+		t.Fatalf("expected actionResultMsg, got %T", msg)
+	}
+	if res.err != nil {
+		t.Fatalf("executeMerge error: %v", res.err)
+	}
+	if res.action != "merge" {
+		t.Fatalf("expected action merge, got %q", res.action)
+	}
+	if gotPath != "/api/v4/projects/group%2Frepo/merge_requests/123/merge" {
+		t.Fatalf("unexpected gitlab merge path: %s", gotPath)
+	}
+
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.PRMergedAt == "" {
+		t.Fatalf("expected PRMergedAt to be set")
+	}
+}
+
+func TestExecuteMergeErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing token", func(t *testing.T) {
+		t.Parallel()
+		m, _, _ := newMergeExecutionModel(t, t.TempDir(), "https://gitlab.com/group/repo/-/merge_requests/1")
+		m.cfg = &config.Config{
+			Projects: []config.ProjectConfig{
+				{
+					Name: "myproject",
+					GitLab: &config.ProjectGitLab{
+						BaseURL:   "https://gitlab.com",
+						ProjectID: "group/repo",
+					},
+				},
+			},
+		}
+
+		msg := m.executeMerge()
+		res := msg.(actionResultMsg)
+		if res.err == nil || !strings.Contains(res.err.Error(), "GITLAB_TOKEN required") {
+			t.Fatalf("expected missing gitlab token error, got %v", res.err)
+		}
+	})
+
+	t.Run("unsupported provider", func(t *testing.T) {
+		t.Parallel()
+		m, _, _ := newMergeExecutionModel(t, t.TempDir(), "https://example.com/pr/1")
+		m.cfg = &config.Config{
+			Projects: []config.ProjectConfig{
+				{Name: "myproject"},
+			},
+		}
+
+		msg := m.executeMerge()
+		res := msg.(actionResultMsg)
+		if res.err == nil || !strings.Contains(res.err.Error(), "no GitHub or GitLab config") {
+			t.Fatalf("expected unsupported provider error, got %v", res.err)
+		}
+	})
+
+	t.Run("github bad URL", func(t *testing.T) {
+		t.Parallel()
+		m, _, _ := newMergeExecutionModel(t, t.TempDir(), "not-a-pr-url")
+		m.cfg = &config.Config{
+			Tokens: config.TokensConfig{GitHub: "gh-token"},
+			Projects: []config.ProjectConfig{
+				{
+					Name: "myproject",
+					GitHub: &config.ProjectGitHub{
+						Owner: "org",
+						Repo:  "repo",
+					},
+				},
+			},
+		}
+
+		msg := m.executeMerge()
+		res := msg.(actionResultMsg)
+		if res.err == nil || !strings.Contains(res.err.Error(), "cannot parse PR number") {
+			t.Fatalf("expected parse error for bad PR URL, got %v", res.err)
+		}
+	})
+}
+
+func TestMergeFailureSetsActionErrInDetailView(t *testing.T) {
+	t.Parallel()
+
+	m, _, _ := newMergeExecutionModel(t, t.TempDir(), "https://gitlab.com/group/repo/-/merge_requests/1")
+	m.cfg = &config.Config{
+		Projects: []config.ProjectConfig{
+			{
+				Name: "myproject",
+				GitLab: &config.ProjectGitLab{
+					BaseURL:   "https://gitlab.com",
+					ProjectID: "group/repo",
+				},
+			},
+		},
+	}
+	m.confirmAction = "merge"
+
+	msg := m.executeMerge()
+	modelAny, _ := m.Update(msg)
+	m = modelAny.(Model)
+
+	if m.actionErr == nil {
+		t.Fatalf("expected actionErr to be set after merge failure")
+	}
+	if m.selected == nil {
+		t.Fatalf("expected detail view to remain open after merge failure")
 	}
 }
 
