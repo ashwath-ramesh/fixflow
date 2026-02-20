@@ -232,6 +232,142 @@ func FindGitLabMRByBranch(ctx context.Context, token, baseURL, projectID, source
 	return "", nil
 }
 
+// MergeGitHubPR merges a GitHub pull request via the merge API.
+func MergeGitHubPR(ctx context.Context, token, prURL, method string) error {
+	method, err := normalizeMergeMethod(method)
+	if err != nil {
+		return err
+	}
+
+	matches := githubPRNumberRe.FindStringSubmatch(prURL)
+	if len(matches) < 2 {
+		return fmt.Errorf("cannot parse PR number from URL: %s", prURL)
+	}
+	prNumber := matches[1]
+
+	// Extract owner/repo from URL.
+	// URL format: https://github.com/{owner}/{repo}/pull/{number}
+	parts := strings.Split(strings.TrimPrefix(prURL, "https://github.com/"), "/")
+	if len(parts) < 2 {
+		return fmt.Errorf("cannot parse owner/repo from URL: %s", prURL)
+	}
+	owner, repo := parts[0], parts[1]
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s/merge", owner, repo, prNumber)
+	payload := map[string]any{"merge_method": method}
+	payloadBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal github merge payload: %w", err)
+	}
+
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, strings.NewReader(string(payloadBody)))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
+	if err != nil {
+		return fmt.Errorf("github merge PR: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		return nil
+	case http.StatusConflict, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
+		msg := string(respBody)
+		if len(msg) > 4096 {
+			msg = msg[:4096]
+		}
+		return fmt.Errorf("PR is not mergeable: HTTP %d: %s", resp.StatusCode, msg)
+	}
+
+	msg := string(respBody)
+	if len(msg) > 4096 {
+		msg = msg[:4096]
+	}
+	return fmt.Errorf("github merge PR: HTTP %d: %s", resp.StatusCode, msg)
+}
+
+// MergeGitLabMR merges a GitLab merge request.
+func MergeGitLabMR(ctx context.Context, token, baseURL, mrURL string, squash bool) error {
+	baseURL = NormalizeGitLabBaseURL(baseURL)
+
+	matches := gitlabMRNumberRe.FindStringSubmatch(mrURL)
+	if len(matches) < 2 {
+		return fmt.Errorf("cannot parse MR number from URL: %s", mrURL)
+	}
+	mrNumber := matches[1]
+
+	// Extract project path from URL.
+	// URL format: https://gitlab.com/{group}/{project}/-/merge_requests/{number}
+	trimmed := strings.TrimPrefix(mrURL, baseURL+"/")
+	before, _, ok := strings.Cut(trimmed, "/-/merge_requests/")
+	if !ok {
+		return fmt.Errorf("cannot parse project path from URL: %s", mrURL)
+	}
+	projectPath := strings.ReplaceAll(before, "/", "%2F")
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%s/merge", baseURL, projectPath, mrNumber)
+	payload := map[string]any{"squash": squash}
+	payloadBody, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal gitlab merge payload: %w", err)
+	}
+
+	resp, err := httputil.Do(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, strings.NewReader(string(payloadBody)))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("PRIVATE-TOKEN", token)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, httputil.DefaultRetryConfig())
+	if err != nil {
+		return fmt.Errorf("gitlab merge MR: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		return nil
+	case http.StatusConflict, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
+		msg := string(respBody)
+		if len(msg) > 4096 {
+			msg = msg[:4096]
+		}
+		return fmt.Errorf("MR is not mergeable: HTTP %d: %s", resp.StatusCode, msg)
+	}
+
+	msg := string(respBody)
+	if len(msg) > 4096 {
+		msg = msg[:4096]
+	}
+	return fmt.Errorf("gitlab merge MR: HTTP %d: %s", resp.StatusCode, msg)
+}
+
+func normalizeMergeMethod(method string) (string, error) {
+	method = strings.ToLower(strings.TrimSpace(method))
+	if method == "" {
+		return "merge", nil
+	}
+	switch method {
+	case "merge", "squash", "rebase":
+		return method, nil
+	default:
+		return "", fmt.Errorf("invalid merge method %q (must be merge, squash, or rebase)", method)
+	}
+}
+
 // PRMergeStatus holds the result of a PR/MR status check.
 type PRMergeStatus struct {
 	Merged   bool

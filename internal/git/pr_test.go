@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -297,5 +298,92 @@ func TestNormalizeGitLabBaseURL(t *testing.T) {
 				t.Fatalf("NormalizeGitLabBaseURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMergeGitLabMR_Succeeds(t *testing.T) {
+	t.Parallel()
+
+	var gotEscapedPath, gotRequestURI, gotMethod string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEscapedPath = r.URL.EscapedPath()
+		gotRequestURI = r.RequestURI
+		gotMethod = r.Method
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if r.Header.Get("PRIVATE-TOKEN") != "tok" {
+			t.Fatalf("token header mismatch: %q", r.Header.Get("PRIVATE-TOKEN"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	mrURL := srv.URL + "/acmecorp/placeholder/-/merge_requests/99"
+	err := MergeGitLabMR(context.Background(), "tok", srv.URL, mrURL, true)
+	if err != nil {
+		t.Fatalf("MergeGitLabMR: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("want method %s, got %s", http.MethodPut, gotMethod)
+	}
+	wantPath := "/api/v4/projects/acmecorp%2Fplaceholder/merge_requests/99/merge"
+	requestPath := gotEscapedPath
+	if requestPath == "" {
+		requestPath = gotRequestURI
+		if i := strings.Index(requestPath, "?"); i != -1 {
+			requestPath = requestPath[:i]
+		}
+	}
+	if requestPath != wantPath {
+		t.Fatalf("want path %q, got escaped=%q request_uri=%q", wantPath, gotEscapedPath, gotRequestURI)
+	}
+	if string(gotBody) == "" {
+		t.Fatalf("expected JSON body")
+	}
+
+	var payload map[string]bool
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got, ok := payload["squash"]; !ok || !got {
+		t.Fatalf("want squash true, got %#v", got)
+	}
+}
+
+func TestMergeGitLabMR_NotMergeableStatuses(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []int{http.StatusConflict, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity} {
+		t.Run(http.StatusText(tc), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc)
+				fmt.Fprintf(w, `{"message":"not mergeable"}`)
+			}))
+			defer srv.Close()
+
+			mrURL := srv.URL + "/acmecorp/placeholder/-/merge_requests/100"
+			err := MergeGitLabMR(context.Background(), "tok", srv.URL, mrURL, false)
+			if err == nil || !strings.Contains(err.Error(), "MR is not mergeable") {
+				t.Fatalf("want merge-blocked error for %d, got: %v", tc, err)
+			}
+		})
+	}
+}
+
+func TestMergeGitHubPR_InvalidMethod(t *testing.T) {
+	err := MergeGitHubPR(context.Background(), "tok", "https://github.com/acmecorp/placeholder/pull/123", "bad")
+	if err == nil || !strings.Contains(err.Error(), "invalid merge method") {
+		t.Fatalf("want invalid method error, got: %v", err)
+	}
+}
+
+func TestMergeGitHubPR_BadPRURL(t *testing.T) {
+	err := MergeGitHubPR(context.Background(), "tok", "https://example.invalid/no-pull", "merge")
+	if err == nil || !strings.Contains(err.Error(), "cannot parse PR number") {
+		t.Fatalf("want parse error, got: %v", err)
 	}
 }
