@@ -731,6 +731,10 @@ func TestResetJobForRetryBlockedWhenIssueIneligible(t *testing.T) {
 	if err := store.TransitionState(ctx, jobID, "planning", "failed"); err != nil {
 		t.Fatalf("transition to failed: %v", err)
 	}
+	jobBefore, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job before retry: %v", err)
+	}
 
 	ineligible := false
 	if _, err := store.UpsertIssue(ctx, IssueUpsert{
@@ -763,6 +767,9 @@ func TestResetJobForRetryBlockedWhenIssueIneligible(t *testing.T) {
 	}
 	if job.State != "failed" {
 		t.Fatalf("expected failed state after blocked retry, got %q", job.State)
+	}
+	if job.Iteration != jobBefore.Iteration {
+		t.Fatalf("expected iteration to stay %d after blocked retry, got %d", jobBefore.Iteration, job.Iteration)
 	}
 }
 
@@ -1160,6 +1167,14 @@ func TestResetJobForRetryFromCancelled(t *testing.T) {
 		t.Fatalf("cancel job: %v", err)
 	}
 
+	jobBefore, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job before retry: %v", err)
+	}
+	if jobBefore.Iteration != 0 {
+		t.Fatalf("expected initial iteration 0, got %d", jobBefore.Iteration)
+	}
+
 	if err := store.ResetJobForRetry(ctx, jobID, "retry after cancel"); err != nil {
 		t.Fatalf("reset for retry: %v", err)
 	}
@@ -1169,6 +1184,75 @@ func TestResetJobForRetryFromCancelled(t *testing.T) {
 	}
 	if job.State != "queued" {
 		t.Fatalf("expected queued, got %q", job.State)
+	}
+	if job.Iteration != jobBefore.Iteration+1 {
+		t.Fatalf("expected iteration to increment from %d to %d, got %d", jobBefore.Iteration, jobBefore.Iteration+1, job.Iteration)
+	}
+}
+
+func TestResetJobForRetryIncrementsFromNonZeroIteration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "retry-nonzero",
+		Title:         "retry nonzero iteration",
+		URL:           "https://github.com/org/repo/issues/302",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim job: %v", err)
+	}
+	if claimedID != jobID {
+		t.Fatalf("expected claimed job %q, got %q", jobID, claimedID)
+	}
+	if err := store.TransitionState(ctx, jobID, "planning", "failed"); err != nil {
+		t.Fatalf("transition planning->failed: %v", err)
+	}
+	if err := store.IncrementIteration(ctx, jobID); err != nil {
+		t.Fatalf("increment iteration: %v", err)
+	}
+	if err := store.IncrementIteration(ctx, jobID); err != nil {
+		t.Fatalf("increment iteration second time: %v", err)
+	}
+
+	jobBefore, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job before retry: %v", err)
+	}
+	if jobBefore.Iteration != 2 {
+		t.Fatalf("expected initial iteration 2, got %d", jobBefore.Iteration)
+	}
+
+	if err := store.ResetJobForRetry(ctx, jobID, "retry from non-zero"); err != nil {
+		t.Fatalf("reset for retry: %v", err)
+	}
+	job, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job after retry: %v", err)
+	}
+	if job.State != "queued" {
+		t.Fatalf("expected queued, got %q", job.State)
+	}
+	if job.Iteration != jobBefore.Iteration+1 {
+		t.Fatalf("expected iteration to increment from %d to %d, got %d", jobBefore.Iteration, jobBefore.Iteration+1, job.Iteration)
 	}
 }
 
@@ -1721,6 +1805,10 @@ func TestResetJobForRetryBlockedByActiveSibling(t *testing.T) {
 	if err := store.TransitionState(ctx, jobA, "planning", "failed"); err != nil {
 		t.Fatalf("transition A to failed: %v", err)
 	}
+	jobBefore, err := store.GetJob(ctx, jobA)
+	if err != nil {
+		t.Fatalf("get job before retry: %v", err)
+	}
 
 	// Create job B (active — queued).
 	jobB, err := store.CreateJob(ctx, ffid, "myproject", 3)
@@ -1738,6 +1826,13 @@ func TestResetJobForRetryBlockedByActiveSibling(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), jobB) {
 		t.Fatalf("expected error to contain sibling job ID %s, got: %v", jobB, err)
+	}
+	jobAfter, err := store.GetJob(ctx, jobA)
+	if err != nil {
+		t.Fatalf("get job after blocked retry: %v", err)
+	}
+	if jobAfter.Iteration != jobBefore.Iteration {
+		t.Fatalf("expected iteration to stay %d after blocked retry, got %d", jobBefore.Iteration, jobAfter.Iteration)
 	}
 }
 

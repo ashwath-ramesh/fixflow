@@ -497,7 +497,7 @@ func (s *Store) IncrementIteration(ctx context.Context, jobID string) error {
 // ResetJobForRetry resets a failed/rejected/cancelled job to queued with fresh state.
 func (s *Store) ResetJobForRetry(ctx context.Context, jobID, notes string) error {
 	res, err := s.Writer.ExecContext(ctx, `
-UPDATE jobs SET state = 'queued', iteration = 0, worktree_path = NULL, branch_name = NULL,
+UPDATE jobs SET state = 'queued', iteration = iteration + 1, worktree_path = NULL, branch_name = NULL,
                commit_sha = NULL, error_message = NULL, human_notes = ?,
                started_at = NULL, completed_at = NULL,
                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
