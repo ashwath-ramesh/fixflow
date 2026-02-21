@@ -4,6 +4,10 @@ Autonomous issue-to-PR daemon. AutoPR watches your GitHub, GitLab, and Sentry is
 then uses an LLM (Claude or Codex CLI) to plan, implement, test, and push fixes — ready
 for human approval.
 
+## Demo
+
+https://github.com/user-attachments/assets/60c0d96f-1589-4d54-968d-47e8baa87b1e
+
 ## Table of Contents
 
 1. [Install](#1-install)
