@@ -12,6 +12,7 @@ import (
 
 var (
 	diffStat    bool
+	diffFiles   bool
 	diffNoColor bool
 )
 
@@ -24,6 +25,7 @@ var diffCmd = &cobra.Command{
 
 func init() {
 	diffCmd.Flags().BoolVar(&diffStat, "stat", false, "show diffstat summary only")
+	diffCmd.Flags().BoolVar(&diffFiles, "files", false, "list changed file paths only")
 	diffCmd.Flags().BoolVar(&diffNoColor, "no-color", false, "disable ANSI colors")
 	rootCmd.AddCommand(diffCmd)
 }
@@ -64,6 +66,14 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		baseBranch = p.BaseBranch
 	}
 
+	if diffFiles && diffStat {
+		return fmt.Errorf("--files cannot be combined with --stat")
+	}
+
+	if diffFiles {
+		return runDiffFiles(cmd, job.WorktreePath, baseBranch, jobID)
+	}
+
 	if diffStat {
 		return runDiffStat(cmd, job.WorktreePath, baseBranch, jobID)
 	}
@@ -95,6 +105,30 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	for line := range strings.SplitSeq(diffText, "\n") {
 		fmt.Println(colorDiffLine(line))
 	}
+	return nil
+}
+
+func runDiffFiles(cmd *cobra.Command, worktreePath, baseBranch, jobID string) error {
+	filesText, err := git.DiffFilesAgainstBase(cmd.Context(), worktreePath, baseBranch)
+	if err != nil {
+		return err
+	}
+
+	if filesText == "" {
+		fmt.Println("(no changes)")
+		return nil
+	}
+
+	if jsonOut {
+		lines := strings.Split(strings.TrimSuffix(filesText, "\n"), "\n")
+		printJSON(map[string]any{
+			"job_id": jobID,
+			"files":  lines,
+		})
+		return nil
+	}
+
+	fmt.Print(filesText)
 	return nil
 }
 
