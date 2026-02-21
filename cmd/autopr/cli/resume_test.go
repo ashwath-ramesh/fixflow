@@ -13,7 +13,6 @@ import (
 )
 
 func TestRunResumeResetsFailedJobAndKeepsIteration(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	configPath := writeMergeConfig(t, tmp)
 	dbPath := filepath.Join(tmp, "autopr.db")
@@ -57,7 +56,6 @@ func TestRunResumeResetsFailedJobAndKeepsIteration(t *testing.T) {
 }
 
 func TestRunResumeRejectsBlockedStates(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	configPath := writeMergeConfig(t, tmp)
 	dbPath := filepath.Join(tmp, "autopr.db")
@@ -92,7 +90,6 @@ func TestRunResumeRejectsBlockedStates(t *testing.T) {
 }
 
 func TestRunResumeJSONOutput(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	configPath := writeMergeConfig(t, tmp)
 	dbPath := filepath.Join(tmp, "autopr.db")
@@ -133,7 +130,6 @@ func TestRunResumeJSONOutput(t *testing.T) {
 }
 
 func TestRunResumeActiveSiblingGuard(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	configPath := writeMergeConfig(t, tmp)
 	dbPath := filepath.Join(tmp, "autopr.db")
@@ -145,7 +141,7 @@ func TestRunResumeActiveSiblingGuard(t *testing.T) {
 	defer store.Close()
 
 	jobA := createMergeJobForTest(t, dbPath, "project", "resume-active-a", "failed", "", "")
-	jobB := createMergeJobForTest(t, dbPath, "project", "resume-active-b", "queued", "", "")
+	jobB := createMergeJobForTest(t, dbPath, "project", "resume-active-a", "queued", "", "")
 
 	prevCfgPath := cfgPath
 	cfgPath = configPath
