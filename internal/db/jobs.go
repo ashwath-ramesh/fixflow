@@ -399,7 +399,39 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	return j, nil
 }
 
+func buildJobsFilterClause(project, state string) (string, []any) {
+	activeStates := []string{"planning", "implementing", "reviewing", "testing", "rebasing", "resolving_conflicts", "awaiting_checks"}
+	clause := []string{"1=1"}
+	args := make([]any, 0, 3)
+
+	if project != "" {
+		clause = append(clause, "j.project_name = ?")
+		args = append(args, project)
+	}
+
+	if state != "" && state != "all" {
+		switch state {
+		case "active":
+			placeholders := strings.Repeat("?,", len(activeStates)-1) + "?"
+			clause = append(clause, "j.state IN ("+placeholders+")")
+			for _, s := range activeStates {
+				args = append(args, s)
+			}
+		case "merged":
+			clause = append(clause, "j.state = ? AND COALESCE(j.pr_merged_at,'') != ''")
+			args = append(args, "approved")
+		default:
+			clause = append(clause, "j.state = ?")
+			args = append(args, state)
+		}
+	}
+
+	return "WHERE " + strings.Join(clause, " AND "), args
+}
+
 func (s *Store) ListJobs(ctx context.Context, project, state, orderBy string, ascending bool) ([]Job, error) {
+	whereClause, args := buildJobsFilterClause(project, state)
+
 	q := `
 	SELECT j.id, j.autopr_issue_id, j.project_name, j.state, j.iteration, j.max_iterations,
 	       COALESCE(j.worktree_path,''), COALESCE(j.branch_name,''), COALESCE(j.commit_sha,''),
@@ -409,35 +441,13 @@ func (s *Store) ListJobs(ctx context.Context, project, state, orderBy string, as
 	       COALESCE(j.ci_started_at,''), COALESCE(j.ci_completed_at,''), COALESCE(j.ci_status_summary,''),
 	       COALESCE(i.source,''), COALESCE(i.source_issue_id,''), COALESCE(i.title,''), COALESCE(i.url,'')
 FROM jobs j
-LEFT JOIN issues i ON j.autopr_issue_id = i.autopr_issue_id
-WHERE 1=1`
-	var args []any
-	if project != "" {
-		q += ` AND j.project_name = ?`
-		args = append(args, project)
-	}
-	if state != "" && state != "all" {
-		switch state {
-		case "active":
-			states := []string{"planning", "implementing", "reviewing", "testing", "rebasing", "resolving_conflicts", "awaiting_checks"}
-			q += " AND j.state IN (" + strings.Repeat("?,", len(states)-1) + "?)"
-			for _, s := range states {
-				args = append(args, s)
-			}
-		case "merged":
-			q += " AND j.state = ? AND COALESCE(j.pr_merged_at,'') != ''"
-			args = append(args, "approved")
-		default:
-			q += ` AND j.state = ?`
-			args = append(args, state)
-		}
-	}
+LEFT JOIN issues i ON j.autopr_issue_id = i.autopr_issue_id ` + whereClause
 	orderExpr := resolveJobOrderExpression(orderBy)
 	direction := "DESC"
 	if ascending {
 		direction = "ASC"
 	}
-	q += fmt.Sprintf(` ORDER BY %s %s, j.id`, orderExpr, direction)
+	q += " ORDER BY " + orderExpr + " " + direction + ", j.id"
 
 	rows, err := s.Reader.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -462,6 +472,64 @@ WHERE 1=1`
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// ListJobsPage returns a single paged result set and the total row count for matching jobs.
+func (s *Store) ListJobsPage(ctx context.Context, project, state, orderBy string, ascending bool, page, pageSize int) ([]Job, int, error) {
+	if page < 1 || pageSize < 1 {
+		return nil, 0, fmt.Errorf("invalid pagination: page and pageSize must be >= 1")
+	}
+
+	whereClause, args := buildJobsFilterClause(project, state)
+
+	countQuery := `SELECT COUNT(*) FROM jobs j ` + whereClause
+	var total int64
+	if err := s.Reader.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count jobs: %w", err)
+	}
+
+	orderExpr := resolveJobOrderExpression(orderBy)
+	direction := "DESC"
+	if ascending {
+		direction = "ASC"
+	}
+
+	offset := (page - 1) * pageSize
+	q := `
+	SELECT j.id, j.autopr_issue_id, j.project_name, j.state, j.iteration, j.max_iterations,
+	       COALESCE(j.worktree_path,''), COALESCE(j.branch_name,''), COALESCE(j.commit_sha,''),
+	       COALESCE(j.human_notes,''), COALESCE(j.error_message,''), COALESCE(j.pr_url,''),
+	       COALESCE(j.reject_reason,''), COALESCE(j.pr_merged_at,''), COALESCE(j.pr_closed_at,''),
+	       j.created_at, j.updated_at, COALESCE(j.started_at,''), COALESCE(j.completed_at,''),
+	       COALESCE(j.ci_started_at,''), COALESCE(j.ci_completed_at,''), COALESCE(j.ci_status_summary,''),
+	       COALESCE(i.source,''), COALESCE(i.source_issue_id,''), COALESCE(i.title,''), COALESCE(i.url,'')
+FROM jobs j
+LEFT JOIN issues i ON j.autopr_issue_id = i.autopr_issue_id ` + whereClause + " ORDER BY " + orderExpr + " " + direction + ", j.id LIMIT ? OFFSET ?"
+	args = append(args, pageSize, offset)
+
+	rows, err := s.Reader.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Job
+	for rows.Next() {
+		var j Job
+		if err := rows.Scan(
+			&j.ID, &j.AutoPRIssueID, &j.ProjectName, &j.State, &j.Iteration, &j.MaxIterations,
+			&j.WorktreePath, &j.BranchName, &j.CommitSHA,
+			&j.HumanNotes, &j.ErrorMessage, &j.PRURL,
+			&j.RejectReason, &j.PRMergedAt, &j.PRClosedAt,
+			&j.CreatedAt, &j.UpdatedAt, &j.StartedAt, &j.CompletedAt,
+			&j.CIStartedAt, &j.CICompletedAt, &j.CIStatusSummary,
+			&j.IssueSource, &j.SourceIssueID, &j.IssueTitle, &j.IssueURL,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan job: %w", err)
+		}
+		out = append(out, j)
+	}
+	return out, int(total), rows.Err()
 }
 
 func resolveJobOrderExpression(orderBy string) string {

@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -290,7 +292,175 @@ func TestRunListRejectsConflictingDirectionFlags(t *testing.T) {
 	}
 }
 
-func runListWithTestConfig(t *testing.T, configPath string, asJSON bool) string {
+// Pagination tests
+
+func TestRunListPaginationFirstPage(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	ordered := seedPaginationJobs(t, dbPath)
+
+	out := runListWithTestConfigPagination(t, cfg, false, "--page", "1", "--page-size", "2")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("unexpected short output: %q", out)
+	}
+	if !strings.Contains(out, "Page 1/3, total rows: 5") {
+		t.Fatalf("expected metadata line, got %q", out)
+	}
+
+	gotIDs := extractListOutputIDs(out)
+	want := []string{db.ShortID(ordered[4]), db.ShortID(ordered[3])}
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Fatalf("unexpected first-page IDs: got %v want %v", gotIDs, want)
+	}
+}
+
+func TestRunListPaginationLastPage(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	ordered := seedPaginationJobs(t, dbPath)
+
+	out := runListWithTestConfigPagination(t, cfg, false, "--page", "3", "--page-size", "2")
+	if !strings.Contains(out, "Page 3/3, total rows: 5") {
+		t.Fatalf("expected metadata line, got %q", out)
+	}
+
+	gotIDs := extractListOutputIDs(out)
+	want := []string{db.ShortID(ordered[0])}
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Fatalf("unexpected last-page IDs: got %v want %v", gotIDs, want)
+	}
+}
+
+func TestRunListPaginationWithStateFilter(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	ordered := seedPaginationJobs(t, dbPath)
+
+	store, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.Writer.ExecContext(context.Background(), `
+UPDATE jobs
+SET state = CASE id
+  WHEN ? THEN 'planning'
+  WHEN ? THEN 'implementing'
+  ELSE 'queued'
+END`, ordered[4], ordered[3]); err != nil {
+		t.Fatalf("set state values: %v", err)
+	}
+
+	out := runListWithTestConfig(t, cfg, false, "--state", "active", "--page", "1", "--page-size", "1")
+	if !strings.Contains(out, "Page 1/2, total rows: 2") {
+		t.Fatalf("expected metadata line, got %q", out)
+	}
+	gotIDs := extractListOutputIDs(out)
+	if len(gotIDs) != 1 {
+		t.Fatalf("expected one row on page one, got %d", len(gotIDs))
+	}
+	want := []string{db.ShortID(ordered[4])}
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Fatalf("unexpected page one active IDs: got %v want %v", gotIDs, want)
+	}
+}
+
+func TestRunListPaginationOutOfRangePage(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	seedPaginationJobs(t, dbPath)
+
+	out := runListWithTestConfigPagination(t, cfg, false, "--page", "4", "--page-size", "2")
+	if !strings.Contains(out, "Page 4/3, total rows: 5") {
+		t.Fatalf("expected metadata line, got %q", out)
+	}
+	if strings.Contains(out, "No jobs found.") {
+		t.Fatalf("unexpected no-jobs message for paged output: %q", out)
+	}
+	if !strings.Contains(strings.TrimSpace(out), "Total: 0 jobs (0 queued, 0 active, 0 failed, 0 merged)") {
+		t.Fatalf("expected empty summary for out-of-range page, got %q", out)
+	}
+}
+
+func TestRunListPaginationInvalidPageSize(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+
+	if _, err := runListWithTestConfigPaginationError(t, cfg, false, "--page", "0", "--page-size", "2"); err == nil {
+		t.Fatalf("expected error for invalid page")
+	}
+	if _, err := runListWithTestConfigPaginationError(t, cfg, false, "--page", "1", "--page-size", "0"); err == nil {
+		t.Fatalf("expected error for page-size 0")
+	}
+	if _, err := runListWithTestConfigPaginationError(t, cfg, false, "--page", "1", "--page-size", "-2"); err == nil {
+		t.Fatalf("expected error for negative page-size")
+	}
+}
+
+func TestRunListAllOverridesPaginationFlags(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	ordered := seedPaginationJobs(t, dbPath)
+
+	out := runListWithTestConfigPagination(t, cfg, false, "--all", "--page", "1", "--page-size", "2")
+	if strings.Contains(out, "Page") {
+		t.Fatalf("unexpected pagination metadata with --all: %q", out)
+	}
+
+	gotIDs := extractListOutputIDs(out)
+	if len(gotIDs) != len(ordered) {
+		t.Fatalf("expected full output with --all, got %d rows", len(gotIDs))
+	}
+}
+
+func TestRunListPaginationJSONPayload(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := writeStatusConfig(t, tmp)
+	dbPath := filepath.Join(tmp, "autopr.db")
+	seedPaginationJobs(t, dbPath)
+
+	out := runListWithTestConfigPagination(t, cfg, true, "--page", "2", "--page-size", "2")
+	got := strings.TrimSpace(out)
+	var payload struct {
+		Jobs     []map[string]any `json:"jobs"`
+		Page     int              `json:"page"`
+		PageSize int              `json:"page_size"`
+		Total    int              `json:"total"`
+	}
+	if err := json.Unmarshal([]byte(got), &payload); err != nil {
+		t.Fatalf("decode paged JSON: %v", err)
+	}
+	if payload.Page != 2 {
+		t.Fatalf("expected page=2, got %d", payload.Page)
+	}
+	if payload.PageSize != 2 {
+		t.Fatalf("expected page_size=2, got %d", payload.PageSize)
+	}
+	if payload.Total != 5 {
+		t.Fatalf("expected total=5, got %d", payload.Total)
+	}
+	if len(payload.Jobs) != 2 {
+		t.Fatalf("expected 2 jobs on page, got %d", len(payload.Jobs))
+	}
+}
+
+// Test helpers
+
+func runListWithTestConfig(t *testing.T, configPath string, asJSON bool, extraArgs ...string) string {
+	if len(extraArgs) > 0 {
+		out, err := runListWithTestConfigPaginationError(t, configPath, asJSON, extraArgs...)
+		if err != nil {
+			t.Fatalf("run list: %v", err)
+		}
+		return out
+	}
 	out, err := runListWithTestConfigWithOptionsResult(t, configPath, asJSON, "", "all", "updated_at", false, false)
 	if err != nil {
 		t.Fatalf("run list: %v", err)
@@ -315,13 +485,10 @@ func runListWithTestConfigWithOptionsResult(t *testing.T, configPath string, asJ
 	prevSort := listSort
 	prevAsc := listAsc
 	prevDesc := listDesc
-	cfgPath = configPath
-	jsonOut = asJSON
-	listProject = project
-	listState = state
-	listSort = sort
-	listAsc = asc
-	listDesc = desc
+	prevCost := listCost
+	prevPage := listPage
+	prevPageSize := listPageSize
+	prevAll := listAll
 	t.Cleanup(func() {
 		cfgPath = prevCfgPath
 		jsonOut = prevJSON
@@ -330,13 +497,193 @@ func runListWithTestConfigWithOptionsResult(t *testing.T, configPath string, asJ
 		listSort = prevSort
 		listAsc = prevAsc
 		listDesc = prevDesc
+		listCost = prevCost
+		listPage = prevPage
+		listPageSize = prevPageSize
+		listAll = prevAll
 	})
 
 	cmd := &cobra.Command{}
+	cmd.Flags().StringVar(&listProject, "project", "", "filter by project name")
+	cmd.Flags().StringVar(&listState, "state", "all", "filter by state")
+	cmd.Flags().StringVar(&listSort, "sort", "updated_at", "sort by field")
+	cmd.Flags().BoolVar(&listAsc, "asc", false, "ascending")
+	cmd.Flags().BoolVar(&listDesc, "desc", false, "descending")
+	cmd.Flags().BoolVar(&listCost, "cost", false, "show estimated cost column")
+	cmd.Flags().IntVar(&listPage, "page", 1, "page number (1-based)")
+	cmd.Flags().IntVar(&listPageSize, "page-size", 20, "number of rows per page")
+	cmd.Flags().BoolVar(&listAll, "all", false, "disable pagination and show full output")
+
+	// Set globals AFTER flag registration (which resets them to defaults).
+	cfgPath = configPath
+	jsonOut = asJSON
+	listProject = project
+	listState = state
+	listSort = sort
+	listAsc = asc
+	listDesc = desc
+	listCost = false
+	listPage = 1
+	listPageSize = 20
+	listAll = false
 	cmd.SetContext(context.Background())
+
 	return captureStdoutWithError(t, func() error {
 		return runList(cmd, nil)
 	})
+}
+
+func runListWithTestConfigPagination(t *testing.T, configPath string, asJSON bool, args ...string) string {
+	out, err := runListWithTestConfigPaginationError(t, configPath, asJSON, args...)
+	if err != nil {
+		t.Fatalf("run list: %v", err)
+	}
+	return out
+}
+
+func runListWithTestConfigPaginationError(t *testing.T, configPath string, asJSON bool, args ...string) (string, error) {
+	t.Helper()
+	prevCfgPath := cfgPath
+	prevJSON := jsonOut
+	prevProject := listProject
+	prevState := listState
+	prevSort := listSort
+	prevAsc := listAsc
+	prevDesc := listDesc
+	prevCost := listCost
+	prevPage := listPage
+	prevPageSize := listPageSize
+	prevAll := listAll
+
+	cfgPath = configPath
+	jsonOut = asJSON
+	listProject = ""
+	listState = "all"
+	listSort = "updated_at"
+	listAsc = false
+	listDesc = false
+	listCost = false
+	listPage = 1
+	listPageSize = 20
+	listAll = false
+	t.Cleanup(func() {
+		cfgPath = prevCfgPath
+		jsonOut = prevJSON
+		listProject = prevProject
+		listState = prevState
+		listSort = prevSort
+		listAsc = prevAsc
+		listDesc = prevDesc
+		listCost = prevCost
+		listPage = prevPage
+		listPageSize = prevPageSize
+		listAll = prevAll
+	})
+
+	cmd := &cobra.Command{}
+	cmd.Flags().StringVar(&listProject, "project", "", "filter by project name")
+	cmd.Flags().StringVar(&listState, "state", "all", "filter by state")
+	cmd.Flags().StringVar(&listSort, "sort", "updated_at", "sort by field")
+	cmd.Flags().BoolVar(&listAsc, "asc", false, "ascending")
+	cmd.Flags().BoolVar(&listDesc, "desc", false, "descending")
+	cmd.Flags().BoolVar(&listCost, "cost", false, "show estimated cost column")
+	cmd.Flags().IntVar(&listPage, "page", 1, "page number (1-based)")
+	cmd.Flags().IntVar(&listPageSize, "page-size", 20, "number of rows per page")
+	cmd.Flags().BoolVar(&listAll, "all", false, "disable pagination and show full output")
+	cmd.SetArgs(args)
+	if err := cmd.ParseFlags(args); err != nil {
+		return "", err
+	}
+	cmd.SetContext(context.Background())
+
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	os.Stdout = w
+
+	runErr := runList(cmd, nil)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+	os.Stdout = prevStdout
+
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read pipe: %v", err)
+	}
+	return string(out), runErr
+}
+
+func extractListOutputIDs(output string) []string {
+	var ids []string
+	re := regexp.MustCompile(`^[0-9a-f]{8}$`)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "JOB" || fields[0] == "Total:" || fields[0] == "Page" {
+			continue
+		}
+		if re.MatchString(fields[0]) {
+			ids = append(ids, fields[0])
+		}
+	}
+	return ids
+}
+
+func seedPaginationJobs(t *testing.T, dbPath string) []string {
+	t.Helper()
+	store, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	var ordered []string
+	updates := []struct {
+		source string
+		time   string
+	}{
+		{"job-1", "2026-02-01T10:00:00Z"},
+		{"job-2", "2026-02-02T10:00:00Z"},
+		{"job-3", "2026-02-03T10:00:00Z"},
+		{"job-4", "2026-02-04T10:00:00Z"},
+		{"job-5", "2026-02-05T10:00:00Z"},
+	}
+
+	for _, entry := range updates {
+		issueID, err := store.UpsertIssue(ctx, db.IssueUpsert{
+			ProjectName:   "project",
+			Source:        "github",
+			SourceIssueID: entry.source,
+			Title:         entry.source,
+			URL:           "https://example.com/" + entry.source,
+			State:         "open",
+		})
+		if err != nil {
+			t.Fatalf("upsert issue %q: %v", entry.source, err)
+		}
+		jobID, err := store.CreateJob(ctx, issueID, "project", 3)
+		if err != nil {
+			t.Fatalf("create job %q: %v", entry.source, err)
+		}
+		if _, err := store.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET state = 'queued', updated_at = ?, created_at = ?
+WHERE id = ?`, entry.time, entry.time, jobID); err != nil {
+			t.Fatalf("set times for %q: %v", entry.source, err)
+		}
+		ordered = append(ordered, jobID)
+	}
+	return ordered
 }
 
 type listJobSeed struct {
