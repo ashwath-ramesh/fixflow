@@ -32,6 +32,10 @@ func TestRunPathsJSONOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
 		t.Fatalf("decode JSON output: %v", err)
 	}
+	var gotRaw map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &gotRaw); err != nil {
+		t.Fatalf("decode JSON output for raw keys: %v", err)
+	}
 
 	expectedConfig, err := config.ConfigDir()
 	if err != nil {
@@ -66,7 +70,12 @@ func TestRunPathsJSONOutput(t *testing.T) {
 	if got.Log == "" {
 		t.Fatalf("expected log path in JSON output")
 	}
-}
+	if _, ok := gotRaw["state"]; ok {
+		t.Fatalf("JSON output should not include \"state\"")
+	}
+	if _, ok := gotRaw["pid"]; ok {
+		t.Fatalf("JSON output should not include \"pid\"")
+	}
 }
 
 func TestRunPathsJSONWithoutConfig(t *testing.T) {
