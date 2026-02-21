@@ -286,7 +286,7 @@ ap notify --test --json
 | `ap stop` | Gracefully stop the daemon |
 | `ap status` | Show daemon status and job counts |
 | `ap status --short` | Print one-line status summary |
-| `ap list [--project X] [--state all|active|merged|queued|planning|implementing|reviewing|testing|ready|rebasing|resolving|resolving_conflicts|awaiting_checks|approved|rejected|failed|cancelled] [--sort updated_at|created_at|state|project] [--asc|--desc]` | List jobs with optional filters |
+| `ap list [--project X] [--state Y] [--sort updated_at\|created_at\|state\|project] [--asc\|--desc] [--page N] [--page-size M] [--all]` | List jobs with optional filters, sorting, and pagination |
 | `ap issues [--project X] [--eligible|--ineligible]` | List synced issues and eligibility |
 | `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
 | `ap approve <job-id>` | Approve a job and create PR |
@@ -301,6 +301,14 @@ ap notify --test --json
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
 `ap open <job-id>` defaults to opening the worktree in your configured editor (`--issue` opens issue URL, `--pr` opens PR/MR URL).
+`ap list` defaults to legacy behavior (no pagination). Use `--page` and/or `--page-size` to request paged results.
+`--all` disables pagination and forces full output. In paged JSON mode, output is an object with `jobs`, `page`, `page_size`, and `total` fields:
+
+```json
+{ "jobs": [...], "page": 1, "page_size": 20, "total": 42 }
+```
+
+In non-JSON mode, paged output prints a metadata line: `Page X/Y, total rows: N`.
 `ap status --short` prints one line, for example:
 
 ```bash

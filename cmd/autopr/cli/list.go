@@ -11,12 +11,15 @@ import (
 )
 
 var (
-	listProject string
-	listState   string
-	listSort    string
-	listAsc     bool
-	listDesc    bool
-	listCost    bool
+	listProject  string
+	listState    string
+	listSort     string
+	listAsc      bool
+	listDesc     bool
+	listCost     bool
+	listPage     int
+	listPageSize int
+	listAll      bool
 )
 
 var listCmd = &cobra.Command{
@@ -32,6 +35,9 @@ func init() {
 	listCmd.Flags().BoolVar(&listAsc, "asc", false, "sort in ascending order")
 	listCmd.Flags().BoolVar(&listDesc, "desc", false, "sort in descending order (default)")
 	listCmd.Flags().BoolVar(&listCost, "cost", false, "show estimated cost column")
+	listCmd.Flags().IntVar(&listPage, "page", 1, "page number (1-based)")
+	listCmd.Flags().IntVar(&listPageSize, "page-size", 20, "number of rows per page")
+	listCmd.Flags().BoolVar(&listAll, "all", false, "disable pagination and show full output")
 	rootCmd.AddCommand(listCmd)
 }
 
@@ -59,17 +65,63 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer store.Close()
 
-	jobs, err := store.ListJobs(cmd.Context(), listProject, state, sortBy, ascending)
-	if err != nil {
-		return err
+	paginate := !listAll && (cmd.Flags().Changed("page") || cmd.Flags().Changed("page-size"))
+	page := listPage
+	pageSize := listPageSize
+
+	if paginate {
+		if page < 1 {
+			return fmt.Errorf("invalid page value %d; expected >= 1", page)
+		}
+		if pageSize < 1 {
+			return fmt.Errorf("invalid page-size value %d; expected >= 1", pageSize)
+		}
+	}
+
+	var jobs []db.Job
+	total := 0
+	if paginate {
+		var err error
+		jobs, total, err = store.ListJobsPage(cmd.Context(), listProject, state, sortBy, ascending, page, pageSize)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+		jobs, err = store.ListJobs(cmd.Context(), listProject, state, sortBy, ascending)
+		if err != nil {
+			return err
+		}
 	}
 
 	if jsonOut {
+		if paginate {
+			printJSON(struct {
+				Jobs     []db.Job `json:"jobs"`
+				Page     int      `json:"page"`
+				PageSize int      `json:"page_size"`
+				Total    int      `json:"total"`
+			}{
+				Jobs:     jobs,
+				Page:     page,
+				PageSize: pageSize,
+				Total:    total,
+			})
+			return nil
+		}
 		printJSON(jobs)
 		return nil
 	}
 
-	if len(jobs) == 0 {
+	if paginate {
+		pages := 0
+		if total > 0 {
+			pages = (total + pageSize - 1) / pageSize
+		}
+		fmt.Printf("Page %d/%d, total rows: %d\n", page, pages, total)
+	}
+
+	if len(jobs) == 0 && !paginate {
 		fmt.Println("No jobs found. Run 'ap start' to begin processing issues.")
 		return nil
 	}
@@ -92,7 +144,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Println(strings.Repeat("-", 136))
 	}
 
-	total := len(jobs)
+	total = len(jobs)
 	queued, active, failed, merged := 0, 0, 0, 0
 
 	for _, j := range jobs {
