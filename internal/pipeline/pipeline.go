@@ -123,6 +123,12 @@ func (r *Runner) runSteps(ctx context.Context, jobID, currentState string, issue
 		// Caller should not call failJob() automatically.
 		skipDefaultFailure bool
 	}
+	job, err := r.store.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	iteration := job.Iteration
+
 	steps := []pipelineStep{
 		{state: "planning", next: "implementing", run: r.runPlan},
 		{state: "implementing", next: "reviewing", run: r.runImplement},
@@ -136,6 +142,30 @@ func (r *Runner) runSteps(ctx context.Context, jobID, currentState string, issue
 		}
 		if r.jobCancelled(jobID) {
 			return errJobCancelled
+		}
+		stepName := db.StepForState(step.state)
+		if stepName != "" {
+			completed, err := r.store.HasCompletedSessionForStep(ctx, jobID, iteration, stepName)
+			if err != nil {
+				return err
+			}
+			if completed {
+				slog.Info("skipping completed step", "job", jobID, "step", stepName)
+				if r.jobCancelled(jobID) {
+					return errJobCancelled
+				}
+				if step.next == "" {
+					continue
+				}
+				if err := r.store.TransitionState(ctx, step.state, step.next); err != nil {
+					if r.jobCancelled(jobID) {
+						return errJobCancelled
+					}
+					return err
+				}
+				currentState = step.next
+				continue
+			}
 		}
 
 		slog.Info("running step", "job", jobID, "step", db.StepForState(step.state))

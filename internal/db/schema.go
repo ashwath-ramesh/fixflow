@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS llm_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_job ON llm_sessions(job_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_job_iteration_step_status
+    ON llm_sessions(job_id, iteration, step, status);
 
 CREATE TABLE IF NOT EXISTS artifacts (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,

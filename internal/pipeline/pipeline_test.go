@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"autopr/internal/db"
+	"autopr/internal/config"
 	"autopr/internal/llm"
 )
 
@@ -49,6 +50,108 @@ func setupInvokeProviderTest(t *testing.T, provider llm.Provider) (*Runner, *db.
 	}
 
 	return &Runner{store: store, provider: provider}, store, jobID
+}
+
+func setupRunStepsJob(t *testing.T, provider llm.Provider, initialState string) (*Runner, *db.Store, db.Issue, string) {
+	t.Helper()
+
+	ctx := context.Background()
+	runner, store, jobID := setupInvokeProviderTest(t, provider)
+
+	if initialState != "queued" {
+		claimedID, err := store.ClaimJob(ctx)
+		if err != nil {
+			t.Fatalf("claim job: %v", err)
+		}
+		if claimedID != jobID {
+			t.Fatalf("expected claimed job %q, got %q", jobID, claimedID)
+		}
+		switch initialState {
+		case "planning":
+			// Nothing to do; job is now planning.
+		case "implementing":
+			if err := store.TransitionState(ctx, "planning", "implementing"); err != nil {
+				t.Fatalf("planning->implementing: %v", err)
+			}
+		case "reviewing":
+			if err := store.TransitionState(ctx, "planning", "implementing"); err != nil {
+				t.Fatalf("planning->implementing: %v", err)
+			}
+			if err := store.TransitionState(ctx, "implementing", "reviewing"); err != nil {
+				t.Fatalf("implementing->reviewing: %v", err)
+			}
+		case "testing":
+			if err := store.TransitionState(ctx, "planning", "implementing"); err != nil {
+				t.Fatalf("planning->implementing: %v", err)
+			}
+			if err := store.TransitionState(ctx, "implementing", "reviewing"); err != nil {
+				t.Fatalf("implementing->reviewing: %v", err)
+			}
+			if err := store.TransitionState(ctx, "reviewing", "testing"); err != nil {
+				t.Fatalf("reviewing->testing: %v", err)
+			}
+		default:
+			t.Fatalf("unsupported initial state: %q", initialState)
+		}
+	}
+
+	issue, err := store.GetIssueByAPID(ctx, mustJobAutoPRIssueID(t, store, jobID))
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+
+	return runner, store, issue, jobID
+}
+
+func mustJobAutoPRIssueID(t *testing.T, store *db.Store, jobID string) string {
+	t.Helper()
+	job, err := store.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("get job %s: %v", jobID, err)
+	}
+	return job.AutoPRIssueID
+}
+
+func seedCompletedSessionForStep(t *testing.T, ctx context.Context, store *db.Store, jobID, step string, iteration int) {
+	t.Helper()
+	sessionID, err := store.CreateSession(ctx, jobID, step, iteration, "codex", "")
+	if err != nil {
+		t.Fatalf("create %s session: %v", step, err)
+	}
+	if err := store.CompleteSession(ctx, sessionID, "completed", "done", "prompt", "hash", "", "", "", 1, 2, 3); err != nil {
+		t.Fatalf("complete %s session: %v", step, err)
+	}
+}
+
+func sessionCountForStep(t *testing.T, store *db.Store, ctx context.Context, jobID, step string) int {
+	t.Helper()
+	sessions, err := store.ListSessionsByJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	n := 0
+	for _, session := range sessions {
+		if session.Step == step {
+			n++
+		}
+	}
+	return n
+}
+
+func testProjectConfigWithoutRebase() *config.ProjectConfig {
+	return &config.ProjectConfig{
+		Name:       "project",
+		RepoURL:    "https://example.com/org/repo.git",
+		BaseBranch: "main",
+		TestCmd:    "",
+	}
+}
+
+func setupArtifactPrefix(t *testing.T, store *db.Store, jobID, issueID string) {
+	t.Helper()
+	if _, err := store.CreateArtifact(context.Background(), jobID, issueID, "plan", "plan body", 0, ""); err != nil {
+		t.Fatalf("seed plan artifact: %v", err)
+	}
 }
 
 func TestInvokeProviderMarksSessionFailedOnProviderError(t *testing.T) {
@@ -156,5 +259,126 @@ func TestInvokeProviderMarksSessionFailedOnPanic(t *testing.T) {
 	}
 	if sess.CompletedAt == "" {
 		t.Fatalf("expected completed_at to be set")
+	}
+}
+
+func TestRunStepsSkipsCompletedPlanAndStartsFromImplementing(t *testing.T) {
+	t.Parallel()
+	provider := stubProvider{
+		run: func(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+			return llm.Response{
+				InputTokens:  1,
+				OutputTokens: 1,
+				DurationMS:   1,
+				Text:         "approved",
+			}, nil
+		},
+	}
+
+	runner, store, issue, jobID := setupRunStepsJob(t, provider, "planning")
+	workDir := t.TempDir()
+	ctx := context.Background()
+
+	seedCompletedSessionForStep(t, ctx, store, jobID, "plan", 0)
+	setupArtifactPrefix(t, store, jobID, issue.AutoPRIssueID)
+
+	planBefore := sessionCountForStep(t, store, ctx, jobID, "plan")
+	if planBefore != 1 {
+		t.Fatalf("expected seeded plan session, got %d", planBefore)
+	}
+
+	err := runner.runSteps(ctx, jobID, "planning", issue, testProjectConfigWithoutRebase(), workDir)
+	if err == nil {
+		t.Fatalf("expected runSteps error (testing stage requires git rebase context)")
+	}
+
+	if got := sessionCountForStep(t, store, ctx, jobID, "plan"); got != 1 {
+		t.Fatalf("plan step should not rerun, got %d sessions", got)
+	}
+	if got := sessionCountForStep(t, store, ctx, jobID, "implement"); got == 0 {
+		t.Fatalf("expected implement step to run after completed plan, got %d", got)
+	}
+}
+
+func TestRunStepsSkipsCompletedPlanImplementAndReviewAndStartsFromTesting(t *testing.T) {
+	t.Parallel()
+	provider := stubProvider{
+		run: func(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+			return llm.Response{
+				InputTokens:  1,
+				OutputTokens: 1,
+				DurationMS:   1,
+				Text:         "approved",
+			}, nil
+		},
+	}
+
+	runner, store, issue, jobID := setupRunStepsJob(t, provider, "reviewing")
+	ctx := context.Background()
+	workDir := t.TempDir()
+
+	seedCompletedSessionForStep(t, ctx, store, jobID, "plan", 0)
+	seedCompletedSessionForStep(t, ctx, store, jobID, "implement", 0)
+	seedCompletedSessionForStep(t, ctx, store, jobID, "code_review", 0)
+	setupArtifactPrefix(t, store, jobID, issue.AutoPRIssueID)
+
+	planBefore := sessionCountForStep(t, store, ctx, jobID, "plan")
+	implementBefore := sessionCountForStep(t, store, ctx, jobID, "implement")
+	reviewBefore := sessionCountForStep(t, store, ctx, jobID, "code_review")
+
+	err := runner.runSteps(ctx, jobID, "reviewing", issue, testProjectConfigWithoutRebase(), workDir)
+	if err == nil {
+		t.Fatalf("expected testing-stage failure")
+	}
+
+	if got := sessionCountForStep(t, store, ctx, jobID, "plan"); got != planBefore {
+		t.Fatalf("expected no new plan sessions, got %d (before %d)", got, planBefore)
+	}
+	if got := sessionCountForStep(t, store, ctx, jobID, "implement"); got != implementBefore {
+		t.Fatalf("expected no new implement sessions, got %d (before %d)", got, implementBefore)
+	}
+	if got := sessionCountForStep(t, store, ctx, jobID, "code_review"); got != reviewBefore {
+		t.Fatalf("expected no new code_review sessions, got %d (before %d)", got, reviewBefore)
+	}
+}
+
+func TestRunStepsSkipsCompletedPrefixAndStartsFromFirstIncompleteStep(t *testing.T) {
+	t.Parallel()
+	provider := stubProvider{
+		run: func(ctx context.Context, workDir, prompt string) (llm.Response, error) {
+			return llm.Response{
+				InputTokens:  1,
+				OutputTokens: 1,
+				DurationMS:   1,
+				Text:         "approved",
+			}, nil
+		},
+	}
+
+	runner, store, issue, jobID := setupRunStepsJob(t, provider, "planning")
+	ctx := context.Background()
+	workDir := t.TempDir()
+
+	seedCompletedSessionForStep(t, ctx, store, jobID, "plan", 0)
+	seedCompletedSessionForStep(t, ctx, store, jobID, "implement", 0)
+	setupArtifactPrefix(t, store, jobID, issue.AutoPRIssueID)
+
+	planBefore := sessionCountForStep(t, store, ctx, jobID, "plan")
+	implementBefore := sessionCountForStep(t, store, ctx, jobID, "implement")
+	reviewBefore := sessionCountForStep(t, store, ctx, jobID, "code_review")
+
+	err := runner.runSteps(ctx, jobID, "planning", issue, testProjectConfigWithoutRebase(), workDir)
+	if err == nil {
+		t.Fatalf("expected testing-stage failure")
+	}
+
+	if got := sessionCountForStep(t, store, ctx, jobID, "plan"); got != planBefore {
+		t.Fatalf("expected no new plan sessions, got %d (before %d)", got, planBefore)
+	}
+	if got := sessionCountForStep(t, store, ctx, jobID, "implement"); got != implementBefore {
+		t.Fatalf("expected no new implement sessions, got %d (before %d)", got, implementBefore)
+	}
+	if got := sessionCountForStep(t, store, ctx, jobID, "code_review"); got != reviewBefore+1 {
+		t.Fatalf("expected code_review to run once, got %d (before %d)", got, reviewBefore)
 	}
 }

@@ -597,6 +597,83 @@ WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason, &siblingID)
 	return nil
 }
 
+// HasCompletedSessionForStep reports whether a completed LLM session exists for a given job, iteration, and step.
+func (s *Store) HasCompletedSessionForStep(ctx context.Context, jobID string, iteration int, step string) (bool, error) {
+	const q = `SELECT COUNT(*) FROM llm_sessions WHERE job_id = ? AND iteration = ? AND step = ? AND status = 'completed'`
+	var count int
+	if err := s.Reader.QueryRowContext(ctx, q, jobID, iteration, step).Scan(&count); err != nil {
+		return false, fmt.Errorf("check completed session for %s %s/%d/%s: %w", jobID, step, iteration, err)
+	}
+	return count > 0, nil
+}
+
+// ResetJobForResume resets a failed/cancelled job to queued without incrementing iteration.
+func (s *Store) ResetJobForResume(ctx context.Context, jobID string) error {
+	res, err := s.Writer.ExecContext(ctx, `
+UPDATE jobs SET state = 'queued', error_message = NULL,
+               started_at = NULL, completed_at = NULL,
+               ci_started_at = NULL, ci_completed_at = NULL, ci_status_summary = '',
+               updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ? AND state IN ('failed', 'cancelled')
+  AND EXISTS (
+    SELECT 1 FROM issues i
+    WHERE i.autopr_issue_id = jobs.autopr_issue_id AND i.eligible = 1
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM jobs AS sibling
+    WHERE sibling.autopr_issue_id = jobs.autopr_issue_id
+      AND sibling.id != jobs.id
+      AND (
+        sibling.state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
+        OR (sibling.state = 'approved' AND sibling.pr_url != ''
+            AND (sibling.pr_merged_at IS NULL OR sibling.pr_merged_at = '')
+            AND (sibling.pr_closed_at IS NULL OR sibling.pr_closed_at = '')
+           )
+      )
+  )`, jobID)
+	if err != nil {
+		return fmt.Errorf("reset job %s for resume: %w", jobID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		var state string
+		var eligible int
+		var skipReason string
+		var siblingID string
+		rowErr := s.Reader.QueryRowContext(ctx, `
+SELECT j.state, COALESCE(i.eligible, 1), COALESCE(i.skip_reason, ''),
+       COALESCE((
+         SELECT s.id FROM jobs s
+         WHERE s.autopr_issue_id = j.autopr_issue_id AND s.id != j.id
+           AND (
+             s.state NOT IN ('approved', 'rejected', 'failed', 'cancelled')
+             OR (s.state = 'approved' AND s.pr_url != ''
+                 AND (s.pr_merged_at IS NULL OR s.pr_merged_at = '')
+                 AND (s.pr_closed_at IS NULL OR s.pr_closed_at = '')
+             )
+           )
+         LIMIT 1
+       ), '')
+FROM jobs j
+LEFT JOIN issues i ON i.autopr_issue_id = j.autopr_issue_id
+WHERE j.id = ?`, jobID).Scan(&state, &eligible, &skipReason, &siblingID)
+		if rowErr == nil && siblingID != "" {
+			return fmt.Errorf("cannot resume: another active job (%s) already exists for this issue", siblingID)
+		}
+		if rowErr == nil && eligible == 0 {
+			if skipReason != "" {
+				return fmt.Errorf("job %s cannot be resumed: issue ineligible (%s)", jobID, skipReason)
+			}
+			return fmt.Errorf("job %s cannot be resumed: issue ineligible", jobID)
+		}
+		if rowErr == nil {
+			return fmt.Errorf("job %s cannot be resumed from current state", jobID)
+		}
+		return fmt.Errorf("reset job %s for resume: %w", jobID, rowErr)
+	}
+	return nil
+}
+
 // CancelJob transitions a single job to cancelled when currently cancellable.
 func (s *Store) CancelJob(ctx context.Context, jobID string) error {
 	res, err := s.Writer.ExecContext(ctx, `

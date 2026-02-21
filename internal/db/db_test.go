@@ -1357,6 +1357,283 @@ func TestResetJobForRetryIncrementsFromNonZeroIteration(t *testing.T) {
 	}
 }
 
+func TestHasCompletedSessionForStep(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "session-complete",
+		Title:         "session completion test",
+		URL:           "https://github.com/org/repo/issues/session-complete",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	completedID, err := store.CreateSession(ctx, jobID, "plan", 0, "codex", "/tmp/plan.jsonl")
+	if err != nil {
+		t.Fatalf("create completed session: %v", err)
+	}
+	if err := store.CompleteSession(ctx, completedID, "completed", "", "", "", "", "", "", 1, 2, 3); err != nil {
+		t.Fatalf("complete session: %v", err)
+	}
+
+	_, err = store.CreateSession(ctx, jobID, "implement", 0, "codex", "/tmp/implement-running.jsonl")
+	if err != nil {
+		t.Fatalf("create running session: %v", err)
+	}
+
+	failedID, err := store.CreateSession(ctx, jobID, "tests", 0, "codex", "/tmp/tests.jsonl")
+	if err != nil {
+		t.Fatalf("create failed session: %v", err)
+	}
+	if err := store.CompleteSession(ctx, failedID, "failed", "", "", "", "", "", "", 1, 2, 3); err != nil {
+		t.Fatalf("fail session: %v", err)
+	}
+
+	otherIterationID, err := store.CreateSession(ctx, jobID, "plan", 1, "codex", "/tmp/plan-iter1.jsonl")
+	if err != nil {
+		t.Fatalf("create other-iteration session: %v", err)
+	}
+	if err := store.CompleteSession(ctx, otherIterationID, "completed", "", "", "", "", "", "", 1, 2, 3); err != nil {
+		t.Fatalf("complete other-iteration session: %v", err)
+	}
+
+	done, err := store.HasCompletedSessionForStep(ctx, jobID, 0, "plan")
+	if err != nil {
+		t.Fatalf("query completed plan: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected completed plan session in iteration 0")
+	}
+
+	done, err = store.HasCompletedSessionForStep(ctx, jobID, 0, "implement")
+	if err != nil {
+		t.Fatalf("query running implement: %v", err)
+	}
+	if done {
+		t.Fatalf("expected no completed implement session in iteration 0")
+	}
+
+	done, err = store.HasCompletedSessionForStep(ctx, jobID, 0, "tests")
+	if err != nil {
+		t.Fatalf("query failed tests: %v", err)
+	}
+	if done {
+		t.Fatalf("expected no completed tests session in iteration 0 when latest is failed")
+	}
+
+	done, err = store.HasCompletedSessionForStep(ctx, jobID, 1, "plan")
+	if err != nil {
+		t.Fatalf("query completed plan iteration 1: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected completed plan session in iteration 1")
+	}
+
+	done, err = store.HasCompletedSessionForStep(ctx, jobID, 0, "nonexistent")
+	if err != nil {
+		t.Fatalf("query missing step: %v", err)
+	}
+	if done {
+		t.Fatalf("expected no completed sessions for unknown step")
+	}
+}
+
+func TestResetJobForResumeKeepsIterationAndPreservesWorktree(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "resume-ok",
+		Title:         "resume keep fields",
+		URL:           "https://github.com/org/repo/issues/resume-ok",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimedID != jobID {
+		t.Fatalf("expected claimed job %q, got %q", jobID, claimedID)
+	}
+	if err := store.TransitionState(ctx, "planning", "failed"); err != nil {
+		t.Fatalf("transition planning->failed: %v", err)
+	}
+	if _, err := store.Writer.ExecContext(ctx, `
+UPDATE jobs
+SET iteration = 2,
+    worktree_path = ?, branch_name = ?, commit_sha = ?,
+    started_at = ?, completed_at = ?, ci_started_at = ?, ci_completed_at = ?,
+    ci_status_summary = 'stale summary',
+    error_message = 'boom'
+WHERE id = ?`, filepath.Join(tmp, "worktree"), "autopr/resume-branch", "abc123", "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", "2026-01-01T02:00:00Z", "2026-01-01T03:00:00Z", jobID); err != nil {
+		t.Fatalf("seed failed job fields: %v", err)
+	}
+
+	if err := store.ResetJobForResume(ctx, jobID); err != nil {
+		t.Fatalf("reset for resume: %v", err)
+	}
+
+	got, err := store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.State != "queued" {
+		t.Fatalf("expected queued, got %q", got.State)
+	}
+	if got.Iteration != 2 {
+		t.Fatalf("expected iteration to stay 2, got %d", got.Iteration)
+	}
+	if got.WorktreePath != filepath.Join(tmp, "worktree") {
+		t.Fatalf("expected preserved worktree, got %q", got.WorktreePath)
+	}
+	if got.BranchName != "autopr/resume-branch" {
+		t.Fatalf("expected preserved branch, got %q", got.BranchName)
+	}
+	if got.CommitSHA != "abc123" {
+		t.Fatalf("expected preserved commit, got %q", got.CommitSHA)
+	}
+	if got.StartedAt != "" || got.CompletedAt != "" || got.CIStartedAt != "" || got.CICompletedAt != "" || got.CIStatusSummary != "" {
+		t.Fatalf("expected queue reset metadata to be cleared, got started=%q completed=%q ci_started=%q ci_completed=%q summary=%q",
+			got.StartedAt, got.CompletedAt, got.CIStartedAt, got.CICompletedAt, got.CIStatusSummary)
+	}
+	if got.ErrorMessage != "" {
+		t.Fatalf("expected error message cleared, got %q", got.ErrorMessage)
+	}
+}
+
+func TestResetJobForResumeRejectsNonTerminalState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "resume-nonterminal",
+		Title:         "resume nonterminal",
+		URL:           "https://github.com/org/repo/issues/resume-nonterminal",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+	jobID, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimedID != jobID {
+		t.Fatalf("expected claimed job %q, got %q", jobID, claimedID)
+	}
+	if err := store.TransitionState(ctx, "planning", "implementing"); err != nil {
+		t.Fatalf("planning->implementing: %v", err)
+	}
+
+	err = store.ResetJobForResume(ctx, jobID)
+	if err == nil {
+		t.Fatalf("expected resume to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot be resumed from current state") {
+		t.Fatalf("expected blocked-state error, got %v", err)
+	}
+}
+
+func TestResetJobForResumeBlockedByActiveSibling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	store, err := Open(filepath.Join(tmp, "autopr.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	issueID, err := store.UpsertIssue(ctx, IssueUpsert{
+		ProjectName:   "myproject",
+		Source:        "github",
+		SourceIssueID: "resume-sibling-1",
+		Title:         "resume sibling test",
+		URL:           "https://github.com/org/repo/issues/resume-sibling-1",
+		State:         "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	jobA, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job A: %v", err)
+	}
+	claimedID, err := store.ClaimJob(ctx)
+	if err != nil {
+		t.Fatalf("claim job A: %v", err)
+	}
+	if claimedID != jobA {
+		t.Fatalf("expected claimed job A %q, got %q", jobA, claimedID)
+	}
+	if err := store.TransitionState(ctx, "planning", "failed"); err != nil {
+		t.Fatalf("transition A failed: %v", err)
+	}
+
+	jobB, err := store.CreateJob(ctx, issueID, "myproject", 3)
+	if err != nil {
+		t.Fatalf("create job B: %v", err)
+	}
+
+	err = store.ResetJobForResume(ctx, jobA)
+	if err == nil {
+		t.Fatalf("expected sibling-blocked resume")
+	}
+	if !strings.Contains(err.Error(), "another active job") {
+		t.Fatalf("expected active sibling error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), jobB) {
+		t.Fatalf("expected error to include sibling id %s, got: %v", jobB, err)
+	}
+}
+
 func TestHasActiveJobForIssueIgnoresCancelled(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
