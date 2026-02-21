@@ -489,17 +489,6 @@ func runListWithTestConfigWithOptionsResult(t *testing.T, configPath string, asJ
 	prevPage := listPage
 	prevPageSize := listPageSize
 	prevAll := listAll
-	cfgPath = configPath
-	jsonOut = asJSON
-	listProject = project
-	listState = state
-	listSort = sort
-	listAsc = asc
-	listDesc = desc
-	listCost = false
-	listPage = 1
-	listPageSize = 20
-	listAll = false
 	t.Cleanup(func() {
 		cfgPath = prevCfgPath
 		jsonOut = prevJSON
@@ -524,6 +513,19 @@ func runListWithTestConfigWithOptionsResult(t *testing.T, configPath string, asJ
 	cmd.Flags().IntVar(&listPage, "page", 1, "page number (1-based)")
 	cmd.Flags().IntVar(&listPageSize, "page-size", 20, "number of rows per page")
 	cmd.Flags().BoolVar(&listAll, "all", false, "disable pagination and show full output")
+
+	// Set globals AFTER flag registration (which resets them to defaults).
+	cfgPath = configPath
+	jsonOut = asJSON
+	listProject = project
+	listState = state
+	listSort = sort
+	listAsc = asc
+	listDesc = desc
+	listCost = false
+	listPage = 1
+	listPageSize = 20
+	listAll = false
 	cmd.SetContext(context.Background())
 
 	return captureStdoutWithError(t, func() error {
