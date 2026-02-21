@@ -93,12 +93,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
       - name: Upload release files
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" dist/release/ap_*.tar.gz dist/release/checksums.txt --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/release/ap_*.tar.gz dist/release/checksums.txt --clobber --repo "$GITHUB_REPOSITORY"
