@@ -293,12 +293,14 @@ ap notify --test --json
 | `ap reject <job-id> [-r reason]` | Reject a job |
 | `ap cancel <job-id> \| --all` | Cancel a queued/running job (or all) |
 | `ap retry <job-id> [-n notes]` | Re-queue a failed/rejected/cancelled job |
+| `ap open <job-id> [--editor \| --issue \| --pr]` | Open job worktree in editor, issue URL, or PR/MR URL |
 | `ap config` | Open config in `$EDITOR` |
 | `ap paths` | Show where files are stored |
 | `ap notify --test` | Send a test notification to configured channels |
 | `ap tui` | Interactive terminal dashboard |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
+`ap open <job-id>` defaults to opening the worktree in your configured editor (`--issue` opens issue URL, `--pr` opens PR/MR URL).
 `ap status --short` prints one line, for example:
 
 ```bash
@@ -346,10 +348,13 @@ session detail and diff views to avoid content jumping.
 | `n`/`PgDown` | Next page |
 | `p`/`PgUp` | Previous page |
 | `enter` | Drill into selected item |
+| `o` | Open selected job worktree in editor |
 | `esc` | Go back one level |
 | `tab` | Toggle input/output (session view) |
 | `d` | View git diff (job detail) |
+| `i` | Open selected issue URL in browser |
 | `c` | Cancel selected/current job (list/detail) |
+| `b` | Open selected PR/MR URL in browser |
 | `u/d` | Half-page scroll (session/diff view) |
 | `r` | Refresh immediately |
 | `q` | Quit |
