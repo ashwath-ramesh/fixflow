@@ -23,6 +23,26 @@ func runPaths(cmd *cobra.Command, args []string) error {
 	dataDir, _ := config.DataDir()
 	stateDir, _ := config.StateDir()
 
+	if jsonOut {
+		payload := map[string]string{
+			"config": configDir,
+			"data":   dataDir,
+			"db":     "",
+			"repos":  "",
+			"log":    "",
+		}
+
+		// If a config is loadable, include resolved paths.
+		if cfg, err := loadConfig(); err == nil {
+			payload["db"] = cfg.DBPath
+			payload["repos"] = cfg.ReposRoot
+			payload["log"] = cfg.LogFile
+		}
+
+		printJSON(payload)
+		return nil
+	}
+
 	fmt.Printf("Config:  %s\n", configDir)
 	fmt.Printf("Data:    %s\n", dataDir)
 	fmt.Printf("State:   %s\n", stateDir)
