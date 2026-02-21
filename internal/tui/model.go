@@ -1690,6 +1690,7 @@ func (m Model) listView() string {
 		colSource  = 13
 		colRetry   = 8
 		colIssue   = 55
+		colUpdated = 19
 	)
 
 	if len(m.jobs) == 0 {
@@ -1723,7 +1724,7 @@ func (m Model) listView() string {
 			headerStyle.Render(padRight("SOURCE", colSource)) +
 			headerStyle.Render(padRight("RETRY", colRetry)) +
 			headerStyle.Render(padRight("ISSUE", colIssue)) +
-			headerStyle.Render(sortLabel([]string{"updated_at", "created_at"}, timestampLabel))
+			headerStyle.Render(padRight(sortLabel([]string{"updated_at", "created_at"}, timestampLabel), colUpdated))
 		b.WriteString(header)
 		b.WriteString("\n")
 
@@ -1750,7 +1751,7 @@ func (m Model) listView() string {
 
 			title := truncate(job.IssueTitle, colIssue-2)
 
-			updated := formatTimestampLocal(job.UpdatedAt, "15:04:05")
+			updated := formatTimestampLocal(job.UpdatedAt, "2006-01-02 15:04:05")
 			textStyle := selectedCellStyle(plainStyle, isSelected)
 			stateCell := selectedCellStyle(st, isSelected)
 			dimCell := selectedCellStyle(dimStyle, isSelected)
@@ -1761,7 +1762,7 @@ func (m Model) listView() string {
 				textStyle.Render(padRight(source, colSource)) +
 				textStyle.Render(padRight(fmt.Sprintf("%d/%d", job.Iteration, job.MaxIterations), colRetry)) +
 				textStyle.Render(padRight(title, colIssue)) +
-				dimCell.Render(updated)
+				dimCell.Render(padRight(updated, colUpdated))
 			b.WriteString(line)
 			b.WriteString("\n")
 		}

@@ -1939,7 +1939,7 @@ func TestListViewUpdatedTimestampUsesYYYYMMDDHHMMSS(t *testing.T) {
 	}
 
 	view := m.listView()
-	expected := formatTimestampLocal("2025-02-19T14:04:05Z", "15:04:05")
+	expected := formatTimestampLocal("2025-02-19T14:04:05Z", "2006-01-02 15:04:05")
 	if !strings.Contains(view, expected) {
 		t.Fatalf("expected formatted updated timestamp in list view (%q), got:\n%s", expected, view)
 	}
