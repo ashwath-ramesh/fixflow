@@ -73,6 +73,9 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Println(strings.Repeat("-", 136))
 	}
 
+	total := len(jobs)
+	queued, active, failed, merged := 0, 0, 0, 0
+
 	for _, j := range jobs {
 		source := ""
 		if j.IssueSource != "" && j.SourceIssueID != "" {
@@ -97,8 +100,32 @@ func runList(cmd *cobra.Command, args []string) error {
 				fmt.Sprintf("%d/%d", j.Iteration, j.MaxIterations),
 				title, j.UpdatedAt)
 		}
+
+		if j.State == "queued" {
+			queued++
+		}
+		if isActiveState(j.State) {
+			active++
+		}
+		switch j.State {
+		case "failed", "rejected", "cancelled":
+			failed++
+		}
+		if j.State == "approved" && j.PRMergedAt != "" {
+			merged++
+		}
 	}
+	fmt.Printf("Total: %d jobs (%d queued, %d active, %d failed, %d merged)\n", total, queued, active, failed, merged)
 	return nil
+}
+
+func isActiveState(state string) bool {
+	switch state {
+	case "planning", "implementing", "reviewing", "testing", "rebasing", "resolving_conflicts", "awaiting_checks":
+		return true
+	default:
+		return false
+	}
 }
 
 func truncate(s string, n int) string {
