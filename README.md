@@ -285,6 +285,7 @@ ap notify --test --json
 | `ap upgrade [--check]` | Check for and install the latest `ap` release |
 | `ap stop` | Gracefully stop the daemon |
 | `ap status` | Show daemon status and job counts |
+| `ap status --short` | Print one-line status summary |
 | `ap list [--project X] [--state Y]` | List jobs with optional filters |
 | `ap issues [--project X] [--eligible|--ineligible]` | List synced issues and eligibility |
 | `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
@@ -298,6 +299,12 @@ ap notify --test --json
 | `ap tui` | Interactive terminal dashboard |
 
 All commands accept `--json` for machine-readable output and `-v` for debug logging.
+`ap status --short` prints one line, for example:
+
+```bash
+ap status --short
+running | 3 queued, 2 active
+```
 `ap start` checks for new releases at most once every 24h and prints a non-blocking upgrade notice when available.
 On macOS with `ap service install`, `ap stop` sends `SIGTERM` but launchd `KeepAlive` may restart it; run `ap service uninstall` to fully disable auto-start/restart.
 

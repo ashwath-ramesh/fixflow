@@ -58,8 +58,19 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+var statusShort bool
+
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().BoolVar(&statusShort, "short", false, "print one-line status summary")
+}
+
+func renderShortStatusSummary(running bool, queued int, active int) string {
+	state := "stopped"
+	if running {
+		state = "running"
+	}
+	return fmt.Sprintf("%s | %d queued, %d active", state, queued, active)
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -142,6 +153,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		PRCreated:    prCreated,
 		Merged:       merged,
 	}
+	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"] + counts["rebasing"] + counts["resolving_conflicts"]
 
 	if jsonOut {
 		printJSON(statusOutput{
@@ -152,12 +164,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if statusShort {
+		fmt.Println(renderShortStatusSummary(running, counts["queued"], active))
+		return nil
+	}
+
 	if running {
 		fmt.Printf("Daemon: running (PID %s)\n", pidStr)
 	} else {
 		fmt.Println("Daemon: stopped")
 	}
-	active := counts["planning"] + counts["implementing"] + counts["reviewing"] + counts["testing"] + counts["rebasing"] + counts["resolving_conflicts"]
 	sections := []struct {
 		title  string
 		values []statusSectionEntry
