@@ -298,7 +298,7 @@ ap notify --test --json
 | `ap status --short` | Print one-line status summary |
 | `ap list [--project X] [--state Y] [--sort updated_at\|created_at\|state\|project] [--asc\|--desc] [--page N] [--page-size M] [--all]` | List jobs with optional filters, sorting, and pagination |
 | `ap issues [--project X] [--eligible|--ineligible]` | List synced issues and eligibility |
-| `ap logs <job-id>` | Show LLM output, artifacts, and tokens |
+| `ap logs <job-id>` | Show LLM output, artifacts, and tokens. Use `--session <index|id>`, `--show-input`, and/or `--show-output` for per-session text |
 | `ap approve <job-id>` | Approve a job and create PR |
 | `ap reject <job-id> [-r reason]` | Reject a job |
 | `ap cancel <job-id> \| --all` | Cancel a queued/running job (or all) |
@@ -338,6 +338,9 @@ ap logs 2dad          # matches ap-job-2dad8b6b...
 ap approve 2d         # works if only one job starts with "2d"
 ap reject 2dad8b6b    # full short ID also works
 ```
+
+For `ap logs`, session selectors use the job session order as 1-based indices. `--session` also accepts a numeric session ID when index lookup does not match.
+When both `--show-input` and `--show-output` are set, output mode wins and prints response text.
 
 For automation, use `ap list --json` which returns full job IDs.
 

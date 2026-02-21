@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,16 @@ import (
 )
 
 var logsFollow bool
+var logsSession string
+var logsShowInput bool
+var logsShowOutput bool
+
+type logsOutputMode string
+
+const (
+	logsOutputModeInput  logsOutputMode = "input"
+	logsOutputModeOutput logsOutputMode = "output"
+)
 
 var logsCmd = &cobra.Command{
 	Use:   "logs <job-id>",
@@ -27,6 +38,9 @@ var logsCmd = &cobra.Command{
 
 func init() {
 	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "stream live LLM output")
+	logsCmd.Flags().StringVar(&logsSession, "session", "", "select session by 1-based index or numeric session ID")
+	logsCmd.Flags().BoolVar(&logsShowInput, "show-input", false, "show prompt text for selected session")
+	logsCmd.Flags().BoolVar(&logsShowOutput, "show-output", false, "show response text for selected session")
 	rootCmd.AddCommand(logsCmd)
 }
 
@@ -64,6 +78,21 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	issue, issueErr := store.GetIssueByAPID(cmd.Context(), job.AutoPRIssueID)
 
 	tokenSummary, _ := store.AggregateTokensByJob(cmd.Context(), jobID)
+
+	if logsSession != "" {
+		targetSession, err := resolveLogsSession(sessions, logsSession, jobID)
+		if err != nil {
+			return err
+		}
+
+		fullSession, err := store.GetFullSession(cmd.Context(), targetSession.ID)
+		if err != nil {
+			return err
+		}
+
+		printSessionText(fullSession, resolveLogsOutputMode(logsShowInput, logsShowOutput))
+		return nil
+	}
 
 	if jsonOut {
 		payload := map[string]any{
@@ -173,6 +202,73 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func resolveLogsOutputMode(showInput, showOutput bool) logsOutputMode {
+	if showOutput {
+		return logsOutputModeOutput
+	}
+	if showInput {
+		return logsOutputModeInput
+	}
+	return logsOutputModeOutput
+}
+
+func resolveLogsSession(sessions []db.LLMSession, selector string, jobID string) (db.LLMSession, error) {
+	trimmed := strings.TrimSpace(selector)
+	if trimmed == "" {
+		return db.LLMSession{}, fmt.Errorf("--session is required")
+	}
+
+	value, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return db.LLMSession{}, fmt.Errorf("--session %q is not a valid integer", selector)
+	}
+	if value <= 0 {
+		return db.LLMSession{}, fmt.Errorf("--session must be a positive integer")
+	}
+
+	if len(sessions) == 0 {
+		return db.LLMSession{}, fmt.Errorf("no sessions found for job %s", jobID)
+	}
+
+	index := value - 1
+	if index < len(sessions) {
+		session := sessions[index]
+		if session.JobID != "" && session.JobID != jobID {
+			return db.LLMSession{}, fmt.Errorf("session %d does not belong to job %s", value, jobID)
+		}
+		return session, nil
+	}
+
+	for _, session := range sessions {
+		if session.ID != int(value) {
+			continue
+		}
+		if session.JobID != "" && session.JobID != jobID {
+			return db.LLMSession{}, fmt.Errorf("session %d does not belong to job %s", value, jobID)
+		}
+		return session, nil
+	}
+
+	return db.LLMSession{}, fmt.Errorf("--session %d is out of range (1-%d) and no matching session id was found for job %s", value, len(sessions), jobID)
+}
+
+func printSessionText(session db.LLMSession, mode logsOutputMode) {
+	fmt.Printf("Session ID: %d\n", session.ID)
+	fmt.Printf("Step: %s (iter %d)\n", db.DisplayStep(session.Step), session.Iteration)
+	fmt.Printf("Status: %s\n", session.Status)
+	fmt.Printf("Provider: %s\n", session.LLMProvider)
+	fmt.Println()
+
+	switch mode {
+	case logsOutputModeInput:
+		fmt.Println("Prompt Text:")
+		fmt.Println(strings.TrimSpace(session.PromptText))
+	default:
+		fmt.Println("Response Text:")
+		fmt.Println(strings.TrimSpace(session.ResponseText))
+	}
 }
 
 // isTerminalState returns true if the job state is terminal.
