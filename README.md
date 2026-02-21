@@ -26,11 +26,14 @@ https://github.com/user-attachments/assets/80011a39-dd73-4052-8e2c-a67bc6244880
 
 ## 1. Install
 
-**macOS:**
+**macOS / Linux:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ashwath-ramesh/autopr/master/scripts/install.sh | bash
 ```
+
+> Linux note: release binaries are CGO-enabled and linked against glibc. They are
+> intended for glibc distros (Ubuntu/Debian/RHEL, etc.), not Alpine/musl.
 
 Upgrade later from CLI:
 
