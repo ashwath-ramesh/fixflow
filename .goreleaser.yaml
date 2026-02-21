@@ -11,12 +11,16 @@ builds:
       - -X autopr/cmd/autopr/cli.commit={{.ShortCommit}}
     goos:
       - darwin
+      - linux
     goarch:
       - amd64
       - arm64
 
+# NOTE: Current CI uses `goreleaser build` only. These blocks are kept in case we
+# switch back to `goreleaser release` later.
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: "ap_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:

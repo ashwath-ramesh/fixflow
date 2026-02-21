@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,26 +86,36 @@ func TestCompare(t *testing.T) {
 	}
 }
 
-func TestSelectAssetURL(t *testing.T) {
+func TestSelectAsset(t *testing.T) {
 	t.Parallel()
 
 	assets := []githubAsset{
 		{Name: "ap_0.4.0_darwin_arm64.tar.gz", URL: "https://example.com/ap_arm64.tar.gz"},
 		{Name: "ap_0.4.0_darwin_amd64.tar.gz", URL: "https://example.com/ap_amd64.tar.gz"},
+		{Name: "ap_0.4.0_linux_amd64.tar.gz", URL: "https://example.com/ap_linux_amd64.tar.gz"},
+		{Name: "ap_0.4.0_linux_arm64.tar.gz", URL: "https://example.com/ap_linux_arm64.tar.gz"},
 	}
 
-	url, err := selectAssetURL(assets, "v0.4.0", "darwin", "arm64")
+	asset, err := selectAsset(assets, "v0.4.0", "darwin", "arm64")
 	if err != nil {
 		t.Fatalf("select asset: %v", err)
 	}
-	if url != "https://example.com/ap_arm64.tar.gz" {
-		t.Fatalf("unexpected URL: %q", url)
+	if asset.URL != "https://example.com/ap_arm64.tar.gz" {
+		t.Fatalf("unexpected URL: %q", asset.URL)
 	}
 
-	if _, err := selectAssetURL(assets, "v0.4.0", "linux", "amd64"); err == nil || !strings.Contains(err.Error(), "unsupported OS") {
+	linuxAsset, err := selectAsset(assets, "v0.4.0", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("select linux asset: %v", err)
+	}
+	if linuxAsset.URL != "https://example.com/ap_linux_amd64.tar.gz" {
+		t.Fatalf("unexpected linux URL: %q", linuxAsset.URL)
+	}
+
+	if _, err := selectAsset(assets, "v0.4.0", "windows", "amd64"); err == nil || !strings.Contains(err.Error(), "unsupported OS") {
 		t.Fatalf("expected unsupported OS error, got %v", err)
 	}
-	if _, err := selectAssetURL(assets, "v0.4.0", "darwin", "386"); err == nil || !strings.Contains(err.Error(), "unsupported architecture") {
+	if _, err := selectAsset(assets, "v0.4.0", "darwin", "386"); err == nil || !strings.Contains(err.Error(), "unsupported architecture") {
 		t.Fatalf("expected unsupported arch error, got %v", err)
 	}
 }
@@ -259,13 +270,17 @@ func TestUpgradeDownloadsAndReplacesBinary(t *testing.T) {
 	}
 
 	archive := mustMakeTarGz(t, "ap", []byte("new-binary"), 0o755)
+	sum := sha256.Sum256(archive)
+	checksums := fmt.Sprintf("%x  ap_0.2.0_darwin_arm64.tar.gz\n", sum)
 
 	assetHits := 0
 	client := &http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			switch r.URL.String() {
 			case "https://api.github.com/repos/ashwath-ramesh/autopr/releases/latest":
-				return jsonResponse(http.StatusOK, `{"tag_name":"v0.2.0","assets":[{"name":"ap_0.2.0_darwin_arm64.tar.gz","browser_download_url":"https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz"}]}`), nil
+				return jsonResponse(http.StatusOK, `{"tag_name":"v0.2.0","assets":[{"name":"ap_0.2.0_darwin_arm64.tar.gz","browser_download_url":"https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz"},{"name":"checksums.txt","browser_download_url":"https://example.com/asset/checksums.txt"}]}`), nil
+			case "https://example.com/asset/checksums.txt":
+				return textResponse(http.StatusOK, checksums), nil
 			case "https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz":
 				assetHits++
 				return binaryResponse(http.StatusOK, archive), nil
@@ -328,7 +343,7 @@ func TestDownloadAndExtractBinaryUsesLongerRequestTimeout(t *testing.T) {
 		Now:    time.Now,
 	}
 
-	got, mode, err := mgr.downloadAndExtractBinary(context.Background(), "https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz")
+	got, mode, err := mgr.downloadAndExtractBinary(context.Background(), "https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz", "")
 	if err != nil {
 		t.Fatalf("download and extract binary: %v", err)
 	}
@@ -346,6 +361,42 @@ func TestDownloadAndExtractBinaryUsesLongerRequestTimeout(t *testing.T) {
 	}
 	if reqDeadline.After(start.Add(defaultAssetDownloadTimeout + 2*time.Second)) {
 		t.Fatalf("download deadline too long: %v", reqDeadline.Sub(start))
+	}
+}
+
+func TestDownloadAndExtractBinaryChecksumMismatch(t *testing.T) {
+	t.Parallel()
+
+	archive := mustMakeTarGz(t, "ap", []byte("new-binary"), 0o755)
+	client := &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return binaryResponse(http.StatusOK, archive), nil
+		}),
+	}
+
+	mgr := &Manager{Client: client, Now: time.Now}
+
+	_, _, err := mgr.downloadAndExtractBinary(context.Background(), "https://example.com/asset/ap_0.2.0_darwin_arm64.tar.gz", strings.Repeat("0", 64))
+	if err == nil || !strings.Contains(err.Error(), "checksum verification failed") {
+		t.Fatalf("expected checksum verification failure, got %v", err)
+	}
+}
+
+func TestChecksumForAsset(t *testing.T) {
+	t.Parallel()
+
+	checksum, err := checksumForAsset("abcd1234  ap_1.0.0_linux_amd64.tar.gz\n", "ap_1.0.0_linux_amd64.tar.gz")
+	if err == nil || !strings.Contains(err.Error(), "invalid checksum") {
+		t.Fatalf("expected invalid checksum error, got checksum=%q err=%v", checksum, err)
+	}
+
+	sum := strings.Repeat("a", 64)
+	checksum, err = checksumForAsset(sum+"  ap_1.0.0_linux_amd64.tar.gz\n", "ap_1.0.0_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatalf("checksumForAsset: %v", err)
+	}
+	if checksum != sum {
+		t.Fatalf("unexpected checksum: %q", checksum)
 	}
 }
 

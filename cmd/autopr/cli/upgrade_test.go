@@ -91,7 +91,7 @@ func TestRunUpgradeInstallsOnlyWhenNewer(t *testing.T) {
 func TestRunUpgradeSurfacesInstallErrors(t *testing.T) {
 	t.Parallel()
 
-	expectedErr := errors.New("unsupported OS \"linux\"")
+	expectedErr := errors.New("install failed")
 	err := runUpgradeWith(context.Background(), &bytes.Buffer{}, mockUpgradeService{
 		upgradeFn: func(context.Context, string) (update.UpgradeResult, error) {
 			return update.UpgradeResult{}, expectedErr
@@ -100,7 +100,7 @@ func TestRunUpgradeSurfacesInstallErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "unsupported OS") {
+	if !strings.Contains(err.Error(), "install failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

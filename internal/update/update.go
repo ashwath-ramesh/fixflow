@@ -2,8 +2,10 @@ package update
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,11 +145,20 @@ func (m *Manager) Upgrade(ctx context.Context, currentVersion string) (UpgradeRe
 		return result, nil
 	}
 
-	assetURL, err := selectAssetURL(release.Assets, release.TagName, m.OS, m.Arch)
+	asset, err := selectAsset(release.Assets, release.TagName, m.OS, m.Arch)
 	if err != nil {
 		return UpgradeResult{}, err
 	}
-	payload, mode, err := m.downloadAndExtractBinary(ctx, assetURL)
+	checksumURL, err := selectChecksumsURL(release.Assets)
+	if err != nil {
+		return UpgradeResult{}, err
+	}
+	expectedChecksum, err := m.fetchExpectedChecksum(ctx, checksumURL, asset.Name)
+	if err != nil {
+		return UpgradeResult{}, err
+	}
+
+	payload, mode, err := m.downloadAndExtractBinary(ctx, asset.URL, expectedChecksum)
 	if err != nil {
 		return UpgradeResult{}, err
 	}
@@ -287,19 +298,19 @@ func (m *Manager) fetchLatestRelease(ctx context.Context) (githubRelease, error)
 	return rel, nil
 }
 
-func selectAssetURL(assets []githubAsset, tag, osName, arch string) (string, error) {
-	if osName != "darwin" {
-		return "", fmt.Errorf("unsupported OS %q (only darwin is supported)", osName)
+func selectAsset(assets []githubAsset, tag, osName, arch string) (githubAsset, error) {
+	if osName != "darwin" && osName != "linux" {
+		return githubAsset{}, fmt.Errorf("unsupported OS %q (supported: darwin, linux)", osName)
 	}
 	if arch != "amd64" && arch != "arm64" {
-		return "", fmt.Errorf("unsupported architecture %q (supported: amd64, arm64)", arch)
+		return githubAsset{}, fmt.Errorf("unsupported architecture %q (supported: amd64, arm64)", arch)
 	}
 
 	expected := expectedAssetNames(tag, osName, arch)
 	for _, name := range expected {
 		for _, asset := range assets {
 			if asset.Name == name && asset.URL != "" {
-				return asset.URL, nil
+				return asset, nil
 			}
 		}
 	}
@@ -307,10 +318,70 @@ func selectAssetURL(assets []githubAsset, tag, osName, arch string) (string, err
 	suffix := fmt.Sprintf("_%s_%s.tar.gz", osName, arch)
 	for _, asset := range assets {
 		if strings.HasPrefix(asset.Name, "ap_") && strings.HasSuffix(asset.Name, suffix) && asset.URL != "" {
+			return asset, nil
+		}
+	}
+	return githubAsset{}, fmt.Errorf("no release asset found for %s/%s", osName, arch)
+}
+
+func selectChecksumsURL(assets []githubAsset) (string, error) {
+	for _, asset := range assets {
+		if asset.Name == "checksums.txt" && asset.URL != "" {
 			return asset.URL, nil
 		}
 	}
-	return "", fmt.Errorf("no release asset found for %s/%s", osName, arch)
+	return "", errors.New("release is missing checksums.txt asset")
+}
+
+func (m *Manager) fetchExpectedChecksum(ctx context.Context, checksumURL, assetName string) (string, error) {
+	ctx, cancel := withTimeout(ctx, defaultReleaseRequestTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build checksum request: %w", err)
+	}
+	if m.UserAgent != "" {
+		req.Header.Set("User-Agent", m.UserAgent)
+	}
+	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := m.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download checksums: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download checksums: status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read checksums: %w", err)
+	}
+
+	return checksumForAsset(string(body), assetName)
+}
+
+func checksumForAsset(text, assetName string) (string, error) {
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		sum := strings.ToLower(fields[0])
+		file := strings.TrimPrefix(fields[1], "*")
+		if filepath.Base(file) != assetName {
+			continue
+		}
+		if len(sum) != sha256.Size*2 {
+			return "", fmt.Errorf("invalid checksum for %q", assetName)
+		}
+		return sum, nil
+	}
+	return "", fmt.Errorf("checksum for %q not found in checksums.txt", assetName)
 }
 
 func expectedAssetNames(tag, osName, arch string) []string {
@@ -343,7 +414,7 @@ func expectedAssetNames(tag, osName, arch string) []string {
 	return names
 }
 
-func (m *Manager) downloadAndExtractBinary(ctx context.Context, assetURL string) ([]byte, os.FileMode, error) {
+func (m *Manager) downloadAndExtractBinary(ctx context.Context, assetURL, expectedChecksum string) ([]byte, os.FileMode, error) {
 	ctx, cancel := withTimeout(ctx, defaultAssetDownloadTimeout)
 	defer cancel()
 
@@ -364,7 +435,19 @@ func (m *Manager) downloadAndExtractBinary(ctx context.Context, assetURL string)
 		return nil, 0, fmt.Errorf("download release asset: status %d", resp.StatusCode)
 	}
 
-	gz, err := gzip.NewReader(resp.Body)
+	archive, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read release asset: %w", err)
+	}
+	if expectedChecksum != "" {
+		actual := sha256.Sum256(archive)
+		actualHex := fmt.Sprintf("%x", actual)
+		if !strings.EqualFold(actualHex, expectedChecksum) {
+			return nil, 0, errors.New("release checksum verification failed")
+		}
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return nil, 0, fmt.Errorf("open release archive: %w", err)
 	}
