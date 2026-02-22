@@ -242,6 +242,27 @@ test_cmd = "make test"
 	}
 }
 
+func TestGitTokenForProject(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Tokens: TokensConfig{
+			GitHub: "gh-token",
+			GitLab: "gl-token",
+		},
+	}
+
+	if got := cfg.GitTokenForProject(&ProjectConfig{GitHub: &ProjectGitHub{Owner: "o", Repo: "r"}}); got != "gh-token" {
+		t.Fatalf("expected github token, got %q", got)
+	}
+	if got := cfg.GitTokenForProject(&ProjectConfig{GitLab: &ProjectGitLab{ProjectID: "1"}}); got != "gl-token" {
+		t.Fatalf("expected gitlab token, got %q", got)
+	}
+	if got := cfg.GitTokenForProject(&ProjectConfig{}); got != "" {
+		t.Fatalf("expected empty token for non-git project, got %q", got)
+	}
+}
+
 func TestExplicitRelativePathsResolveToConfigDir(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()

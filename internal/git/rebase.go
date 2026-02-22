@@ -11,8 +11,22 @@ import (
 )
 
 // FetchBranch fetches the latest commits for the given base branch.
-func FetchBranch(ctx context.Context, dir, baseBranch string) error {
-	return runGitCaptured(ctx, dir, "fetch", "origin", "--", baseBranch)
+func FetchBranch(ctx context.Context, dir, baseBranch, token string) error {
+	remoteURL, err := getRemoteURL(ctx, dir, "origin")
+	if err != nil {
+		return fmt.Errorf("read origin remote: %w", err)
+	}
+	authURL, auth, err := prepareGitRemoteAuth(remoteURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
+
+	if err := ensureRemoteSanitized(ctx, dir, "origin", remoteURL, authURL, auth); err != nil {
+		return fmt.Errorf("sanitize origin remote: %w", err)
+	}
+
+	return runGitWithOptions(ctx, dir, optionsFromAuth(auth), "fetch", "origin", "--", baseBranch)
 }
 
 // ConfigureDiff3 enables diff3 conflict markers for clearer rebase conflict output.

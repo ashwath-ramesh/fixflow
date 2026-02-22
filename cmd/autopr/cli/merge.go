@@ -116,7 +116,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("mark job merged: %w", err)
 	}
 
-	if err := mergeCleanup(cmd.Context(), store, cfg.ReposRoot, job); err != nil {
+	if err := mergeCleanup(cmd.Context(), store, cfg.ReposRoot, job, cfg.GitTokenForProject(proj)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: cleanup worktree after merge: %v\n", err)
 	}
 
@@ -136,7 +136,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func cleanupMergedWorktree(ctx context.Context, store *db.Store, reposRoot string, job db.Job) error {
+func cleanupMergedWorktree(ctx context.Context, store *db.Store, reposRoot string, job db.Job, token string) error {
 	worktreePath := strings.TrimSpace(job.WorktreePath)
 	if worktreePath == "" && reposRoot != "" {
 		worktreePath = filepath.Join(reposRoot, "worktrees", job.ID)
@@ -147,7 +147,7 @@ func cleanupMergedWorktree(ctx context.Context, store *db.Store, reposRoot strin
 
 	branchName := strings.TrimSpace(job.BranchName)
 	if branchName != "" {
-		if err := git.DeleteRemoteBranch(ctx, worktreePath, branchName); err != nil {
+		if err := git.DeleteRemoteBranchWithToken(ctx, worktreePath, branchName, token); err != nil {
 			return fmt.Errorf("delete remote branch: %w", err)
 		}
 	}

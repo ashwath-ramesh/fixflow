@@ -36,7 +36,7 @@ func TestCleanupWorktreeDeletesRemoteBranchBeforeLocalCleanup(t *testing.T) {
 
 	remoteDeleted := false
 	s := NewSyncer(&config.Config{}, store, make(chan string, 1))
-	s.deleteRemoteBranch = func(ctx context.Context, dir, branchName string) error {
+	s.deleteRemoteBranch = func(ctx context.Context, dir, branchName, token string) error {
 		remoteDeleted = true
 		if branchName != "autopr/cleanup-before-local" {
 			t.Fatalf("unexpected branch: %q", branchName)
@@ -86,7 +86,7 @@ func TestCleanupWorktreeSkipsRemoteDeleteWithEmptyBranch(t *testing.T) {
 	}
 
 	s := NewSyncer(&config.Config{}, store, make(chan string, 1))
-	s.deleteRemoteBranch = func(ctx context.Context, dir, branchName string) error {
+	s.deleteRemoteBranch = func(ctx context.Context, dir, branchName, token string) error {
 		t.Fatalf("unexpected remote delete call for empty branch: branch=%q", branchName)
 		return nil
 	}
