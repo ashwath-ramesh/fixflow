@@ -582,6 +582,20 @@ func (cfg *Config) ProjectByName(name string) (*ProjectConfig, bool) {
 	return nil, false
 }
 
+// GitTokenForProject returns the git token for a project source.
+func (cfg *Config) GitTokenForProject(p *ProjectConfig) string {
+	if p == nil {
+		return ""
+	}
+	if p.GitLab != nil {
+		return cfg.Tokens.GitLab
+	}
+	if p.GitHub != nil {
+		return cfg.Tokens.GitHub
+	}
+	return ""
+}
+
 func (cfg *Config) SlogLevel() slog.Level {
 	switch cfg.LogLevel {
 	case "debug":

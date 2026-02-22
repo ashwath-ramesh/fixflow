@@ -3,20 +3,68 @@ package git
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 )
+
+const (
+	redactedValue      = "[REDACTED]"
+	askPassUsernameEnv = "AUTOPR_GIT_ASKPASS_USERNAME"
+	askPassPasswordEnv = "AUTOPR_GIT_ASKPASS_PASSWORD"
+)
+
+var (
+	credentialURLWarnings sync.Map
+	urlPattern            = regexp.MustCompile(`https?://[^\s"'` + "`" + `]+`)
+	knownTokenPatterns    = []*regexp.Regexp{
+		regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),
+		regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),
+		regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),
+		regexp.MustCompile(`gldt-[A-Za-z0-9_-]{20,}`),
+		regexp.MustCompile(`glcbt-[A-Za-z0-9_-]{20,}`),
+		regexp.MustCompile(`glptt-[A-Za-z0-9_-]{20,}`),
+		regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),
+		regexp.MustCompile(`oauth2:[^@/\s]+@`),
+	}
+)
+
+type gitRunOptions struct {
+	env     []string
+	secrets []string
+}
+
+type gitAuthSession struct {
+	env     []string
+	secrets []string
+	cleanup func()
+}
+
+type remoteURLInfo struct {
+	SanitizedURL string
+	Username     string
+	Password     string
+	Secrets      []string
+}
 
 // EnsureClone clones the repo if it doesn't exist, otherwise fetches.
 func EnsureClone(ctx context.Context, repoURL, localPath, token string) error {
 	if _, err := os.Stat(localPath); err == nil {
-		return Fetch(ctx, localPath)
+		return fetchAll(ctx, localPath, repoURL, token)
 	}
-	authURL := injectToken(repoURL, token)
-	slog.Info("cloning repository", "url", repoURL, "path", localPath)
+
+	remoteInfo, err := prepareRemoteURL(repoURL)
+	if err != nil {
+		return err
+	}
+	slog.Info("cloning repository", "url", redactSensitiveText(remoteInfo.SanitizedURL, nil), "path", localPath)
 	if err := os.MkdirAll(localPath, 0o755); err != nil {
 		return fmt.Errorf("create repo dir: %w", err)
 	}
@@ -24,15 +72,34 @@ func EnsureClone(ctx context.Context, repoURL, localPath, token string) error {
 	if err := runGit(ctx, localPath, "init", "--bare"); err != nil {
 		return err
 	}
-	if err := runGit(ctx, localPath, "remote", "add", "origin", authURL); err != nil {
+	if err := runGit(ctx, localPath, "remote", "add", "origin", remoteInfo.SanitizedURL); err != nil {
 		return err
 	}
-	return Fetch(ctx, localPath)
+	return fetchAll(ctx, localPath, remoteInfo.SanitizedURL, token)
 }
 
 // Fetch fetches all refs in the bare repo.
-func Fetch(ctx context.Context, localPath string) error {
-	return runGit(ctx, localPath, "fetch", "--all", "--prune")
+func Fetch(ctx context.Context, localPath, token string) error {
+	remoteURL, err := getRemoteURL(ctx, localPath, "origin")
+	if err != nil {
+		return runGit(ctx, localPath, "fetch", "--all", "--prune")
+	}
+	return fetchAll(ctx, localPath, remoteURL, token)
+}
+
+func fetchAll(ctx context.Context, localPath, remoteURL, token string) error {
+	authURL, auth, err := prepareGitRemoteAuth(remoteURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
+
+	if err := ensureRemoteSanitized(ctx, localPath, "origin", remoteURL, authURL, auth); err != nil {
+		return err
+	}
+
+	slog.Info("fetching repository", "remote", redactSensitiveText(authURL, nil), "path", localPath)
+	return runGitWithOptions(ctx, localPath, optionsFromAuth(auth), "fetch", "--all", "--prune")
 }
 
 // LatestCommit returns the HEAD commit SHA in the given directory.
@@ -52,13 +119,11 @@ func CommitAll(ctx context.Context, dir, message string) (string, error) {
 	}
 
 	// Check if there's anything to commit.
-	out, err := runGitOutput(ctx, dir, "diff", "--cached", "--quiet")
+	_, err := runGitOutput(ctx, dir, "diff", "--cached", "--quiet")
 	if err == nil {
 		// No diff means nothing staged.
 		return "", fmt.Errorf("nothing to commit")
 	}
-	// err != nil means there are staged changes (diff --cached returns exit 1).
-	_ = out
 
 	if err := runGit(ctx, dir, "commit", "-m", message); err != nil {
 		return "", fmt.Errorf("git commit: %w", err)
@@ -68,75 +133,16 @@ func CommitAll(ctx context.Context, dir, message string) (string, error) {
 }
 
 // PushBranch pushes a branch to origin.
-// NOTE: This requires Contents: Read and write on the GitHub fine-grained PAT.
-// With read-only access, this call will fail with a permission error.
 func PushBranch(ctx context.Context, dir, branchName string) error {
-	return PushBranchToRemote(ctx, dir, "origin", branchName)
-}
-
-// PushBranchWithLease pushes a branch with --force-with-lease.
-func PushBranchWithLease(ctx context.Context, dir, branchName string) error {
-	return PushBranchWithLeaseToRemote(ctx, dir, "origin", branchName)
-}
-
-// PushBranchToRemote pushes a branch to the named remote.
-func PushBranchToRemote(ctx context.Context, dir, remote, branchName string) error {
-	return PushBranchToRemoteWithToken(ctx, dir, remote, branchName, "")
-}
-
-// PushBranchWithLeaseToRemote pushes a branch with --force-with-lease.
-func PushBranchWithLeaseToRemote(ctx context.Context, dir, remote, branchName string) error {
-	return PushBranchWithLeaseToRemoteWithToken(ctx, dir, remote, branchName, "")
-}
-
-// PushBranchToRemoteWithToken pushes a branch to the named remote.
-//
-// If token is provided and the remote is HTTPS, this uses token-authenticated
-// URL for this command only so credentials are not persisted in remote config.
-func PushBranchToRemoteWithToken(ctx context.Context, dir, remoteName, branchName, token string) error {
-	return pushBranchToRemote(ctx, dir, remoteName, branchName, false, token, false)
-}
-
-// PushBranchWithLeaseCaptured pushes a branch with --force-with-lease without
-// writing output to the process stdout/stderr (safe for TUI callers).
-func PushBranchWithLeaseCaptured(ctx context.Context, dir, branchName string) error {
-	return PushBranchWithLeaseCapturedToRemote(ctx, dir, "origin", branchName)
-}
-
-// PushBranchWithLeaseCapturedToRemote pushes a branch with --force-with-lease without
-// writing output to the process stdout/stderr (safe for TUI callers).
-func PushBranchWithLeaseCapturedToRemote(ctx context.Context, dir, remote, branchName string) error {
-	return PushBranchWithLeaseCapturedToRemoteWithToken(ctx, dir, remote, branchName, "")
+	return pushBranchToRemote(ctx, dir, "origin", branchName, false, "")
 }
 
 // PushBranchWithLeaseToRemoteWithToken pushes a branch with --force-with-lease.
 func PushBranchWithLeaseToRemoteWithToken(ctx context.Context, dir, remoteName, branchName, token string) error {
-	return pushBranchToRemote(ctx, dir, remoteName, branchName, true, token, false)
+	return pushBranchToRemote(ctx, dir, remoteName, branchName, true, token)
 }
 
-// PushBranchCaptured pushes a branch to origin without writing output to the
-// process stdout/stderr. Any git output is captured and included in errors.
-func PushBranchCaptured(ctx context.Context, dir, branchName string) error {
-	return PushBranchCapturedToRemote(ctx, dir, "origin", branchName)
-}
-
-// PushBranchCapturedToRemote pushes a branch to the named remote without writing output
-// to the process stdout/stderr. Any git output is captured and included in errors.
-func PushBranchCapturedToRemote(ctx context.Context, dir, remote, branchName string) error {
-	return PushBranchCapturedToRemoteWithToken(ctx, dir, remote, branchName, "")
-}
-
-func PushBranchWithLeaseCapturedToRemoteWithToken(ctx context.Context, dir, remoteName, branchName, token string) error {
-	return pushBranchToRemote(ctx, dir, remoteName, branchName, true, token, true)
-}
-
-// PushBranchCapturedToRemoteWithToken pushes a branch to the named remote and
-// captures output so stdout/stderr can be returned in errors.
-func PushBranchCapturedToRemoteWithToken(ctx context.Context, dir, remoteName, branchName, token string) error {
-	return pushBranchToRemote(ctx, dir, remoteName, branchName, false, token, true)
-}
-
-func pushBranchToRemote(ctx context.Context, dir, remoteName, branchName string, forceWithLease bool, token string, captured bool) error {
+func pushBranchToRemote(ctx context.Context, dir, remoteName, branchName string, forceWithLease bool, token string) error {
 	remoteName = strings.TrimSpace(remoteName)
 	branchName = strings.TrimSpace(branchName)
 	if remoteName == "" {
@@ -152,43 +158,61 @@ func pushBranchToRemote(ctx context.Context, dir, remoteName, branchName string,
 	}
 	args = append(args, branchName)
 
-	if token == "" {
-		if captured {
-			return runGitCaptured(ctx, dir, args...)
-		}
-		return runGit(ctx, dir, args...)
-	}
-
 	remoteURL, err := getRemoteURL(ctx, dir, remoteName)
 	if err != nil {
 		return err
 	}
-	authURL := injectToken(remoteURL, token)
-	if authURL == remoteURL {
-		if captured {
-			return runGitCaptured(ctx, dir, args...)
-		}
-		return runGit(ctx, dir, args...)
+	authURL, auth, err := prepareGitRemoteAuth(remoteURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
+
+	if err := ensureRemoteSanitized(ctx, dir, remoteName, remoteURL, authURL, auth); err != nil {
+		return err
 	}
 
-	config := map[string]string{
-		fmt.Sprintf("remote.%s.pushurl", remoteName): authURL,
-	}
-
-	if captured {
-		return runGitCapturedWithConfig(ctx, dir, config, args...)
-	}
-	return runGitWithConfig(ctx, dir, config, args...)
+	return runGitWithOptions(ctx, dir, optionsFromAuth(auth), args...)
 }
 
 // DeleteRemoteBranch deletes a branch from origin in the given repository.
 // Callers decide whether a failure should be fatal.
 func DeleteRemoteBranch(ctx context.Context, dir, branchName string) error {
+	return DeleteRemoteBranchWithToken(ctx, dir, branchName, "")
+}
+
+// DeleteRemoteBranchWithToken deletes a branch from origin using optional token auth.
+func DeleteRemoteBranchWithToken(ctx context.Context, dir, branchName, token string) error {
 	branchName = strings.TrimSpace(branchName)
 	if branchName == "" {
 		return fmt.Errorf("branch name is empty")
 	}
-	return runGit(ctx, dir, "push", "origin", "--delete", branchName)
+
+	remoteURL, err := getRemoteURL(ctx, dir, "origin")
+	if err != nil {
+		return err
+	}
+	authURL, auth, err := prepareGitRemoteAuth(remoteURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
+
+	if err := ensureRemoteSanitized(ctx, dir, "origin", remoteURL, authURL, auth); err != nil {
+		return err
+	}
+
+	return runGitWithOptions(ctx, dir, optionsFromAuth(auth), "push", "origin", "--delete", branchName)
+}
+
+func ensureRemoteSanitized(ctx context.Context, dir, remoteName, currentURL, targetURL string, auth *gitAuthSession) error {
+	if strings.TrimSpace(currentURL) == "" || strings.TrimSpace(targetURL) == "" {
+		return nil
+	}
+	if currentURL == targetURL {
+		return nil
+	}
+	return runGitWithOptions(ctx, dir, optionsFromAuth(auth), "remote", "set-url", remoteName, targetURL)
 }
 
 // EnsureRemote configures a named remote URL.
@@ -204,12 +228,24 @@ func EnsureRemote(ctx context.Context, dir, remoteName, remoteURL string) error 
 		return fmt.Errorf("remote URL is empty")
 	}
 
+	targetInfo, err := prepareRemoteURL(remoteURL)
+	if err != nil {
+		return err
+	}
+
 	existingRaw, errOut, err := runGitOutputAndErr(ctx, dir, "remote", "get-url", remoteName)
 	if err == nil {
-		if strings.TrimSpace(existingRaw) == remoteURL {
+		existingInfo, prepErr := prepareRemoteURL(strings.TrimSpace(existingRaw))
+		if prepErr != nil {
+			return prepErr
+		}
+		if existingInfo.SanitizedURL == targetInfo.SanitizedURL {
+			if strings.TrimSpace(existingRaw) != existingInfo.SanitizedURL {
+				return runGit(ctx, dir, "remote", "set-url", remoteName, existingInfo.SanitizedURL)
+			}
 			return nil
 		}
-		return fmt.Errorf("remote %q exists with different URL %q", remoteName, strings.TrimSpace(existingRaw))
+		return fmt.Errorf("remote %q exists with different URL %q", remoteName, existingInfo.SanitizedURL)
 	}
 
 	errText := strings.ToLower(strings.TrimSpace(errOut))
@@ -219,7 +255,7 @@ func EnsureRemote(ctx context.Context, dir, remoteName, remoteURL string) error 
 	if !isMissingGitRemoteError(errText) {
 		return fmt.Errorf("get remote %q url: %w: %s", remoteName, err, errText)
 	}
-	return runGit(ctx, dir, "remote", "add", remoteName, remoteURL)
+	return runGit(ctx, dir, "remote", "add", remoteName, targetInfo.SanitizedURL)
 }
 
 func isMissingGitRemoteError(errText string) bool {
@@ -234,8 +270,14 @@ func CheckGitRemoteReachable(ctx context.Context, remoteURL, token string) error
 	if remoteURL == "" {
 		return fmt.Errorf("remote URL is empty")
 	}
-	authURL := injectToken(remoteURL, token)
-	if _, _, err := runGitOutputAndErr(ctx, "", "ls-remote", authURL); err != nil {
+
+	authURL, auth, err := prepareGitRemoteAuth(remoteURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
+
+	if _, _, err := runGitOutputAndErrWithOptions(ctx, "", false, optionsFromAuth(auth), "ls-remote", authURL); err != nil {
 		return fmt.Errorf("check remote reachability: %w", err)
 	}
 	return nil
@@ -258,62 +300,215 @@ func getRemoteURL(ctx context.Context, dir, remoteName string) (string, error) {
 	return existingURL, nil
 }
 
-func injectToken(repoURL, token string) string {
-	if token == "" {
-		return repoURL
+func prepareRemoteURL(remoteURL string) (remoteURLInfo, error) {
+	remoteURL = strings.TrimSpace(remoteURL)
+	if remoteURL == "" {
+		return remoteURLInfo{}, fmt.Errorf("remote URL is empty")
 	}
-	// For HTTPS URLs, inject token as oauth2 credential.
-	if strings.HasPrefix(repoURL, "https://") {
-		base := strings.TrimPrefix(repoURL, "https://")
-		if at := strings.Index(base, "@"); at >= 0 {
-			base = base[at+1:]
+	if !isHTTPRemoteURL(remoteURL) {
+		return remoteURLInfo{SanitizedURL: remoteURL}, nil
+	}
+
+	parsed, err := url.Parse(remoteURL)
+	if err != nil {
+		return remoteURLInfo{}, fmt.Errorf("parse remote URL: %w", err)
+	}
+
+	info := remoteURLInfo{}
+	if parsed.User != nil {
+		warnCredentialURL(remoteURL)
+		info.Username = parsed.User.Username()
+		if pass, ok := parsed.User.Password(); ok {
+			info.Password = pass
 		}
-		return "https://oauth2:" + token + "@" + base
+		info.Secrets = dedupeNonEmpty(info.Username, info.Password)
+		parsed.User = nil
 	}
-	return repoURL
+	info.SanitizedURL = parsed.String()
+	return info, nil
+}
+
+func prepareGitRemoteAuth(remoteURL, token string) (string, *gitAuthSession, error) {
+	remoteInfo, err := prepareRemoteURL(remoteURL)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if !isHTTPRemoteURL(remoteInfo.SanitizedURL) {
+		return remoteInfo.SanitizedURL, &gitAuthSession{secrets: dedupeNonEmpty(append(remoteInfo.Secrets, token)...)}, nil
+	}
+
+	username := "oauth2"
+	password := strings.TrimSpace(token)
+	if password == "" {
+		if remoteInfo.Password != "" {
+			password = remoteInfo.Password
+			if remoteInfo.Username != "" {
+				username = remoteInfo.Username
+			}
+		} else if remoteInfo.Username != "" {
+			// Compatibility fallback for URLs like https://TOKEN@host/repo.git
+			password = remoteInfo.Username
+		}
+	}
+
+	allSecrets := dedupeNonEmpty(append(remoteInfo.Secrets, token, password)...)
+	if password == "" {
+		return remoteInfo.SanitizedURL, &gitAuthSession{secrets: allSecrets}, nil
+	}
+
+	scriptPath, err := writeAskPassScript()
+	if err != nil {
+		return "", nil, fmt.Errorf("create askpass script: %w", err)
+	}
+	auth := &gitAuthSession{
+		env: []string{
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_ASKPASS=" + scriptPath,
+			askPassUsernameEnv + "=" + username,
+			askPassPasswordEnv + "=" + password,
+		},
+		secrets: allSecrets,
+		cleanup: func() {
+			_ = os.Remove(scriptPath)
+		},
+	}
+	return remoteInfo.SanitizedURL, auth, nil
+}
+
+func optionsFromAuth(auth *gitAuthSession) gitRunOptions {
+	if auth == nil {
+		return gitRunOptions{}
+	}
+	return gitRunOptions{env: auth.env, secrets: auth.secrets}
+}
+
+func closeGitAuth(auth *gitAuthSession) {
+	if auth != nil && auth.cleanup != nil {
+		auth.cleanup()
+	}
+}
+
+func writeAskPassScript() (string, error) {
+	if runtime.GOOS == "windows" {
+		return writeAskPassScriptWindows()
+	}
+	return writeAskPassScriptPOSIX()
+}
+
+func writeAskPassScriptPOSIX() (string, error) {
+	f, err := os.CreateTemp("", "autopr-git-askpass-*.sh")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	script := "#!/bin/sh\n" +
+		"prompt=\"$1\"\n" +
+		"case \"$prompt\" in\n" +
+		"  *Username*|*username*) printf '%s\\n' \"$" + askPassUsernameEnv + "\" ;;\n" +
+		"  *) printf '%s\\n' \"$" + askPassPasswordEnv + "\" ;;\n" +
+		"esac\n"
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func writeAskPassScriptWindows() (string, error) {
+	f, err := os.CreateTemp("", "autopr-git-askpass-*.cmd")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	script := "@echo off\r\n" +
+		"set prompt=%~1\r\n" +
+		"echo %prompt%| findstr /I \"username\" >nul\r\n" +
+		"if %errorlevel%==0 (\r\n" +
+		"  echo %" + askPassUsernameEnv + "%\r\n" +
+		") else (\r\n" +
+		"  echo %" + askPassPasswordEnv + "%\r\n" +
+		")\r\n"
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func warnCredentialURL(remoteURL string) {
+	trimmed := strings.TrimSpace(remoteURL)
+	if trimmed == "" || !isHTTPRemoteURL(trimmed) {
+		return
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || parsed.User == nil {
+		return
+	}
+	parsed.User = nil
+	key := parsed.String()
+	if _, loaded := credentialURLWarnings.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("git remote URL contains embedded credentials; use credentials.toml or env token instead", "url", redactSensitiveText(trimmed, nil))
+}
+
+func isHTTPRemoteURL(raw string) bool {
+	return strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://")
 }
 
 func runGit(ctx context.Context, dir string, args ...string) error {
+	return runGitWithOptions(ctx, dir, gitRunOptions{}, args...)
+}
+
+func runGitWithOptions(ctx context.Context, dir string, opts gitRunOptions, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	if len(opts.env) > 0 {
+		cmd.Env = append(cmd.Environ(), opts.env...)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return formatGitCommandError(args, out, err, opts.secrets)
 	}
 	return nil
 }
 
-func runGitWithConfig(ctx context.Context, dir string, config map[string]string, args ...string) error {
-	if len(config) == 0 {
-		return runGit(ctx, dir, args...)
-	}
-
-	runArgs := make([]string, 0, len(config)*2+len(args))
-	for key, value := range config {
-		runArgs = append(runArgs, "-c", fmt.Sprintf("%s=%s", key, value))
-	}
-	runArgs = append(runArgs, args...)
-	return runGit(ctx, dir, runArgs...)
-}
-
 func runGitOutputAndErr(ctx context.Context, dir string, args ...string) (string, string, error) {
-	return runGitOutputAndErrWithNoEditorSetting(ctx, dir, false, args...)
+	return runGitOutputAndErrWithOptions(ctx, dir, false, gitRunOptions{}, args...)
 }
 
 func runGitOutputAndErrWithNoEditor(ctx context.Context, dir string, args ...string) (string, string, error) {
-	return runGitOutputAndErrWithNoEditorSetting(ctx, dir, true, args...)
+	return runGitOutputAndErrWithOptions(ctx, dir, true, gitRunOptions{}, args...)
 }
 
-func runGitOutputAndErrWithNoEditorSetting(ctx context.Context, dir string, noEditor bool, args ...string) (string, string, error) {
+func runGitOutputAndErrWithOptions(ctx context.Context, dir string, noEditor bool, opts gitRunOptions, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	if noEditor {
-		cmd.Env = append(cmd.Environ(), "GIT_EDITOR=true")
+		opts.env = append(opts.env, "GIT_EDITOR=true")
+	}
+	if len(opts.env) > 0 {
+		cmd.Env = append(cmd.Environ(), opts.env...)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -321,61 +516,92 @@ func runGitOutputAndErrWithNoEditorSetting(ctx context.Context, dir string, noEd
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err == nil {
-		return stdout.String(), stderr.String(), nil
+		return redactSensitiveText(stdout.String(), opts.secrets), redactSensitiveText(stderr.String(), opts.secrets), nil
 	}
-	return stdout.String(), stderr.String(), err
-}
-
-func runGitCaptured(ctx context.Context, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, msg)
-		}
-		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
-	}
-	return nil
-}
-
-func runGitCapturedWithConfig(ctx context.Context, dir string, config map[string]string, args ...string) error {
-	if len(config) == 0 {
-		return runGitCaptured(ctx, dir, args...)
-	}
-
-	runArgs := make([]string, 0, len(config)*2+len(args))
-	for key, value := range config {
-		runArgs = append(runArgs, "-c", fmt.Sprintf("%s=%s", key, value))
-	}
-	runArgs = append(runArgs, args...)
-
-	cmd := exec.CommandContext(ctx, "git", runArgs...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return fmt.Errorf("git %s: %w: %s", strings.Join(runArgs, " "), err, msg)
-		}
-		return fmt.Errorf("git %s: %w", strings.Join(runArgs, " "), err)
-	}
-	return nil
+	return redactSensitiveText(stdout.String(), opts.secrets), redactSensitiveText(stderr.String(), opts.secrets), err
 }
 
 func runGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	return runGitOutputWithOptions(ctx, dir, gitRunOptions{}, args...)
+}
+
+func runGitOutputWithOptions(ctx context.Context, dir string, opts gitRunOptions, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	if len(opts.env) > 0 {
+		cmd.Env = append(cmd.Environ(), opts.env...)
+	}
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		msg := out
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			if len(msg) > 0 && msg[len(msg)-1] != '\n' {
+				msg = append(msg, '\n')
+			}
+			msg = append(msg, exitErr.Stderr...)
+		}
+		return "", formatGitCommandError(args, msg, err, opts.secrets)
 	}
-	return string(out), nil
+	return redactSensitiveText(string(out), opts.secrets), nil
+}
+
+func formatGitCommandError(args []string, out []byte, err error, secrets []string) error {
+	cmdText := redactSensitiveText(strings.Join(args, " "), secrets)
+	msg := strings.TrimSpace(redactSensitiveText(string(out), secrets))
+	if msg != "" {
+		return fmt.Errorf("git %s: %w: %s", cmdText, err, msg)
+	}
+	return fmt.Errorf("git %s: %w", cmdText, err)
+}
+
+func redactSensitiveText(msg string, secrets []string) string {
+	if msg == "" {
+		return msg
+	}
+	redacted := msg
+	for _, secret := range dedupeNonEmpty(secrets...) {
+		redacted = strings.ReplaceAll(redacted, secret, redactedValue)
+	}
+	redacted = redactURLUserInfo(redacted)
+	for _, pattern := range knownTokenPatterns {
+		redacted = pattern.ReplaceAllString(redacted, redactedValue)
+	}
+	return redacted
+}
+
+func redactURLUserInfo(msg string) string {
+	return urlPattern.ReplaceAllStringFunc(msg, func(match string) string {
+		parsed, err := url.Parse(match)
+		if err != nil {
+			return match
+		}
+		if parsed.User == nil {
+			return match
+		}
+		parsed.User = nil
+		return parsed.String()
+	})
+}
+
+func dedupeNonEmpty(values ...string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }

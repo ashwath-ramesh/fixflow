@@ -221,8 +221,14 @@ log_file = "/custom/path/autopr.log"
 > scoped to the target repo. With read-only contents access, the daemon will work end-to-end but
 > branch push will fail — you'll need to push branches manually after approving jobs.
 >
+> AutoPR does **not** embed tokens in clone/push URLs. It uses per-command credential flow (`GIT_ASKPASS`)
+> so tokens are not persisted in git remotes, command args, or logs.
+>
 > For fork-based PRs (`fork_owner` set), branch push is still sent to `https://github.com/<fork_owner>/<repo>.git`
 > while PRs are opened against the upstream repo. Keep `fork_owner` unset for direct-push behavior.
+>
+> Credentialed `repo_url` values (for example `https://oauth2:<token>@...`) are still accepted for compatibility,
+> but AutoPR warns and strips embedded credentials from stored remotes.
 
 ### 4.3 Notifications
 

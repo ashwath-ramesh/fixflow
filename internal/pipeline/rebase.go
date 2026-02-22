@@ -38,8 +38,8 @@ type rebaseConflictReport struct {
 // (TUI, CLI, daemon auto_pr). Unlike the pipeline rebase step, conflicts here
 // are not auto-resolved — any conflict is treated as a hard error so the user
 // can re-run the pipeline.
-func RebaseBeforePush(ctx context.Context, store *db.Store, jobID, issueAPID, baseBranch, workDir string, iteration int) error {
-	if err := git.FetchBranch(ctx, workDir, baseBranch); err != nil {
+func RebaseBeforePush(ctx context.Context, store *db.Store, jobID, issueAPID, baseBranch, workDir string, iteration int, token string) error {
+	if err := git.FetchBranch(ctx, workDir, baseBranch, token); err != nil {
 		return fmt.Errorf("fetch base branch: %w", err)
 	}
 
@@ -108,7 +108,7 @@ func (r *Runner) runRebaseBeforeReady(ctx context.Context, jobID string, issue d
 	if err := git.ConfigureDiff3(ctx, workDir); err != nil {
 		return r.failJob(ctx, jobID, "rebasing", "configure git diff3 markers: "+err.Error())
 	}
-	if err := git.FetchBranch(ctx, workDir, projectCfg.BaseBranch); err != nil {
+	if err := git.FetchBranch(ctx, workDir, projectCfg.BaseBranch, r.cfg.GitTokenForProject(projectCfg)); err != nil {
 		return r.failJob(ctx, jobID, "rebasing", "fetch base branch: "+err.Error())
 	}
 

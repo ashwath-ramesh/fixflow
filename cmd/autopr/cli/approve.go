@@ -3,8 +3,6 @@ package cli
 import (
 	"fmt"
 
-	"autopr/internal/config"
-	"autopr/internal/db"
 	"autopr/internal/git"
 	"autopr/internal/pipeline"
 
@@ -62,7 +60,7 @@ func runApprove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Rebase onto latest base branch before pushing.
-	if err := pipeline.RebaseBeforePush(cmd.Context(), store, job.ID, job.AutoPRIssueID, proj.BaseBranch, job.WorktreePath, job.Iteration); err != nil {
+	if err := pipeline.RebaseBeforePush(cmd.Context(), store, job.ID, job.AutoPRIssueID, proj.BaseBranch, job.WorktreePath, job.Iteration, cfg.GitTokenForProject(proj)); err != nil {
 		return fmt.Errorf("rebase before push: %w", err)
 	}
 
@@ -77,7 +75,7 @@ func runApprove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Push branch to remote before creating PR.
-	if err := git.PushBranchWithLeaseToRemoteWithToken(cmd.Context(), job.WorktreePath, pushRemote, job.BranchName, cfg.Tokens.GitHub); err != nil {
+	if err := git.PushBranchWithLeaseToRemoteWithToken(cmd.Context(), job.WorktreePath, pushRemote, job.BranchName, cfg.GitTokenForProject(proj)); err != nil {
 		return fmt.Errorf("push branch: %w", err)
 	}
 
@@ -89,7 +87,7 @@ func runApprove(cmd *cobra.Command, args []string) error {
 		prTitle, prBody := pipeline.BuildPRContent(cmd.Context(), store, job, issue)
 
 		// Create PR/MR depending on source.
-		prURL, err = createPR(cmd, cfg, proj, job, pushHead, prTitle, prBody)
+		prURL, err = pipeline.CreatePRForProject(cmd.Context(), cfg, proj, job, pushHead, prTitle, prBody, approveDraft)
 		if err != nil {
 			return fmt.Errorf("create PR: %w", err)
 		}
@@ -120,47 +118,4 @@ func runApprove(cmd *cobra.Command, args []string) error {
 		fmt.Printf("PR: %s\n", prURL)
 	}
 	return nil
-}
-
-// createPR creates a GitHub PR or GitLab MR depending on the project config.
-func createPR(cmd *cobra.Command, cfg *config.Config, proj *config.ProjectConfig, job db.Job, head, title, body string) (string, error) {
-	if job.BranchName == "" {
-		return "", fmt.Errorf("job has no branch name — was the branch pushed?")
-	}
-
-	switch {
-	case proj.GitHub != nil:
-		if cfg.Tokens.GitHub == "" {
-			return "", fmt.Errorf("GITHUB_TOKEN required to create PR")
-		}
-		return git.CreateGitHubPR(
-			cmd.Context(),
-			cfg.Tokens.GitHub,
-			proj.GitHub.Owner,
-			proj.GitHub.Repo,
-			head,
-			proj.BaseBranch,
-			title,
-			body,
-			approveDraft,
-		)
-
-	case proj.GitLab != nil:
-		if cfg.Tokens.GitLab == "" {
-			return "", fmt.Errorf("GITLAB_TOKEN required to create MR")
-		}
-		return git.CreateGitLabMR(
-			cmd.Context(),
-			cfg.Tokens.GitLab,
-			proj.GitLab.BaseURL,
-			proj.GitLab.ProjectID,
-			job.BranchName,
-			proj.BaseBranch,
-			title,
-			body,
-		)
-
-	default:
-		return "", fmt.Errorf("project %q has no GitHub or GitLab config for PR creation", proj.Name)
-	}
 }

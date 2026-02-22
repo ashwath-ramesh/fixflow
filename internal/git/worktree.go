@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,13 +20,22 @@ func CloneForJob(ctx context.Context, repoURL, token, destPath, branchName, base
 		return fmt.Errorf("prepare clone destination: %w", err)
 	}
 
-	authURL := injectToken(repoURL, token)
+	authURL, auth, err := prepareGitRemoteAuth(repoURL, token)
+	if err != nil {
+		return err
+	}
+	defer closeGitAuth(auth)
 
 	// Clone from the remote. For repos that already have a local bare cache,
 	// git will use hard links for shared objects automatically when on the
 	// same filesystem.
-	if err := runGit(ctx, "", "clone", "--branch", baseBranch, authURL, destPath); err != nil {
+	slog.Info("cloning job repository", "url", redactSensitiveText(authURL, nil), "path", destPath, "base_branch", baseBranch)
+	if err := runGitWithOptions(ctx, "", optionsFromAuth(auth), "clone", "--branch", baseBranch, authURL, destPath); err != nil {
 		return fmt.Errorf("clone for job: %w", err)
+	}
+
+	if err := ensureRemoteSanitized(ctx, destPath, "origin", repoURL, authURL, auth); err != nil {
+		return fmt.Errorf("sanitize origin remote: %w", err)
 	}
 
 	// Create and checkout the job branch.

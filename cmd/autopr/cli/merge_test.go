@@ -45,7 +45,7 @@ func TestMergeApprovedJobSetsMergedAt(t *testing.T) {
 		return nil
 	}
 	now = func() string { return mergedAt }
-	mergeCleanup = func(context.Context, *db.Store, string, db.Job) error { return nil }
+	mergeCleanup = func(context.Context, *db.Store, string, db.Job, string) error { return nil }
 	jsonOut = false
 	cfgPath = mergeCfgPath
 	mergeMethod = "merge"
@@ -231,7 +231,7 @@ func TestMergeJSONOutput(t *testing.T) {
 	cfgPath = mergeCfgPath
 	now = func() string { return "2026-02-20T11:00:00Z" }
 	mergeGitHub = func(context.Context, string, string, string) error { return nil }
-	mergeCleanup = func(context.Context, *db.Store, string, db.Job) error { return nil }
+	mergeCleanup = func(context.Context, *db.Store, string, db.Job, string) error { return nil }
 	mergeMethod = "merge"
 	jsonOut = true
 

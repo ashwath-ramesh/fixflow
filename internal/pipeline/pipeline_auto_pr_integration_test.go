@@ -87,13 +87,13 @@ func TestMaybeAutoPR_WithForkOwnerPushesToForkRemote(t *testing.T) {
 	}
 
 	pushedRemote := ""
-	runner.pushBranchWithLeaseToRemote = func(ctx context.Context, dir, remote, branchName string) error {
+	runner.pushBranchWithLeaseToRemote = func(ctx context.Context, dir, remote, branchName, token string) error {
 		pushedRemote = remote
-		return git.PushBranchWithLeaseToRemote(ctx, dir, remote, branchName)
+		return git.PushBranchWithLeaseToRemoteWithToken(ctx, dir, remote, branchName, token)
 	}
 
 	var createdHead string
-	runner.createPRForProjectFn = func(ctx context.Context, cfg *config.Config, proj *config.ProjectConfig, job db.Job, head, title, body string) (string, error) {
+	runner.createPRForProjectFn = func(ctx context.Context, cfg *config.Config, proj *config.ProjectConfig, job db.Job, head, title, body string, draft bool) (string, error) {
 		createdHead = head
 		return "https://github.com/acme/repo/pull/123", nil
 	}
