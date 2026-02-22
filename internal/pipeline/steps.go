@@ -264,7 +264,15 @@ func runTestCommand(ctx context.Context, dir, testCmd string) (string, error) {
 		return "no test command configured", nil
 	}
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", testCmd)
+	args, err := parseTestCommand(testCmd)
+	if err != nil {
+		return err.Error(), err
+	}
+	if err := validateTestCommandArgs(args); err != nil {
+		return err.Error(), err
+	}
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	output := string(out)

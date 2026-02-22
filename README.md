@@ -171,6 +171,9 @@ provider = "codex"         # codex or claude
 name = "my-project"
 repo_url = "git@github.com:org/repo.git"
 test_cmd = "go test ./..."
+# test_cmd runs directly (no shell). Operators like && ; | $() ` < > are rejected.
+# Invoking shell executables directly (sh/bash/zsh/...) is rejected.
+# Use quotes for args with spaces, e.g. test_cmd = "go test -run \"Test Foo\"".
 base_branch = "main"
   # exclude_labels = ["autopr-skip"] # optional: issues with these labels are ignored
   # exclude_labels = [] # optional: disable default skip label

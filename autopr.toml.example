@@ -63,6 +63,9 @@ provider = "claude"  # claude or codex
 name = "my-project"
 repo_url = "https://gitlab.com/myorg/my-project.git"
 test_cmd = "make test"
+# test_cmd runs directly (no shell). Operators like && ; | $() ` < > are rejected.
+# Invoking shell executables directly (sh/bash/zsh/...) is rejected.
+# Use quotes for args with spaces, e.g. test_cmd = "go test -run \"Test Foo\"".
 base_branch = "main"
   # exclude_labels = ["autopr-skip"] # DEFAULT — issues labeled "autopr-skip" are skipped
   # exclude_labels = ["blocked"]   # custom: skip issues labeled "blocked"

@@ -251,6 +251,9 @@ provider = "codex"              # codex|claude
 name = "my-project"
 repo_url = "git@github.com:org/repo.git"
 test_cmd = "go test ./..."
+# test_cmd runs directly (no shell). Operators like && ; | $() backticks < > are rejected.
+# Invoking shell executables directly (sh/bash/zsh/...) is rejected.
+# Use quotes for args with spaces, e.g. test_cmd = "go test -run \"Test Foo\"".
 base_branch = "main"
   # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
   # exclude_labels = ["blocked"] # custom: skip issues labeled "blocked"
@@ -284,6 +287,9 @@ base_branch = "main"
 # name = "my-gitlab-project"
 # repo_url = "git@gitlab.com:org/repo.git"
 # test_cmd = "make test"
+# test_cmd runs directly (no shell). Operators like && ; | $() backticks < > are rejected.
+# Invoking shell executables directly (sh/bash/zsh/...) is rejected.
+# Use quotes for args with spaces, e.g. test_cmd = "go test -run \"Test Foo\"".
 # base_branch = "main"
 #   # exclude_labels defaults to ["autopr-skip"] -- issues with this label are skipped
 #   # exclude_labels = ["blocked"]     # custom: skip issues labeled "blocked"
